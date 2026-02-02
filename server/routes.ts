@@ -1226,6 +1226,21 @@ async function runActualBacktest(backtestId: number, config: any) {
 
             try {
               const raw = JSON.parse(pyOut) as any;
+
+              try {
+                const rawStatsPath = path.join(runExportDir, "raw-stats.json");
+                await fs.writeFile(rawStatsPath, JSON.stringify(raw, null, 2), "utf-8");
+                await storage.appendBacktestLog(
+                  backtestId,
+                  `\n✓ Raw stats saved to: ${path.relative(projectRoot, rawStatsPath)}\n`
+                );
+              } catch (e: any) {
+                await storage.appendBacktestLog(
+                  backtestId,
+                  `\n⚠ Failed to write raw stats artifact: ${e?.message || e}\n`
+                );
+              }
+
               const strategyKeys = raw?.strategy ? Object.keys(raw.strategy) : [];
               const selectedKey = strategyKeys[0];
               const strat = selectedKey ? raw.strategy[selectedKey] : undefined;
@@ -1260,6 +1275,18 @@ async function runActualBacktest(backtestId: number, config: any) {
               let peak = startEquity;
               let max_drawdown = 0;
 
+              const equityCurve: Array<{
+                idx: number;
+                pair: string;
+                close_date: string;
+                profit_ratio: number;
+                profit_abs: number;
+                equity_before: number;
+                equity_after: number;
+                peak: number;
+                drawdown: number;
+              }> = [];
+
               for (const tr of trades) {
                 const r = Number.isFinite(tr.profit_ratio) ? tr.profit_ratio : 0;
                 const equityBefore = equity;
@@ -1274,6 +1301,32 @@ async function runActualBacktest(backtestId: number, config: any) {
                 if (equity > peak) peak = equity;
                 const dd = peak > 0 ? (peak - equity) / peak : 0;
                 if (dd > max_drawdown) max_drawdown = dd;
+
+                equityCurve.push({
+                  idx: equityCurve.length,
+                  pair: tr.pair,
+                  close_date: String((tr as any).close_date ?? ""),
+                  profit_ratio: r,
+                  profit_abs: profitAbs,
+                  equity_before: equityBefore,
+                  equity_after: equityAfter,
+                  peak,
+                  drawdown: dd,
+                });
+              }
+
+              try {
+                const equityCurvePath = path.join(runExportDir, "equity-curve.json");
+                await fs.writeFile(equityCurvePath, JSON.stringify(equityCurve, null, 2), "utf-8");
+                await storage.appendBacktestLog(
+                  backtestId,
+                  `\n✓ Equity curve saved to: ${path.relative(projectRoot, equityCurvePath)}\n`
+                );
+              } catch (e: any) {
+                await storage.appendBacktestLog(
+                  backtestId,
+                  `\n⚠ Failed to write equity curve artifact: ${e?.message || e}\n`
+                );
               }
 
               const profit_total = startEquity > 0 ? equity / startEquity - 1 : 0;
