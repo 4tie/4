@@ -2,11 +2,27 @@ import { db } from "./db";
 import { sql } from "drizzle-orm";
 import {
   files as filesTable, backtests, diagnosticReports,
+  diagnosticJobs,
+  aiChatSessions,
+  aiChatMessages,
+  aiAuditEvents,
   type File, type InsertFile,
   type Backtest, type InsertBacktest,
-  type DiagnosticReport, type InsertDiagnosticReport
+  type DiagnosticReport, type InsertDiagnosticReport,
+  type DiagnosticJob, type InsertDiagnosticJob,
+  type AiChatSession,
+  type AiChatMessage, type InsertAiChatMessage,
+  type AiAuditEvent, type InsertAiAuditEvent
 } from "@shared/schema";
-import { eq, desc } from "drizzle-orm";
+<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
+<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
+import { eq, desc, asc, gt } from "drizzle-orm";
+=======
+import { and, eq, desc, asc, gt } from "drizzle-orm";
+>>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
+=======
+import { and, eq, desc, asc, gt } from "drizzle-orm";
+>>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
@@ -33,6 +49,20 @@ export interface IStorage {
   createDiagnosticReport(report: InsertDiagnosticReport): Promise<DiagnosticReport>;
   getDiagnosticReport(id: number): Promise<DiagnosticReport | undefined>;
   getDiagnosticReports(backtestId?: number): Promise<DiagnosticReport[]>;
+
+  // Diagnostic Jobs
+  createDiagnosticJob(job: InsertDiagnosticJob): Promise<DiagnosticJob>;
+  updateDiagnosticJob(id: string, patch: Partial<DiagnosticJob>): Promise<DiagnosticJob>;
+  getDiagnosticJob(id: string): Promise<DiagnosticJob | undefined>;
+  getDiagnosticJobs(backtestId?: number): Promise<DiagnosticJob[]>;
+
+  // AI Chat Persistence
+  getAiChatSessionByKey(sessionKey: string): Promise<AiChatSession | undefined>;
+  getOrCreateAiChatSession(sessionKey: string, strategyPath: string | null, backtestId: number | null): Promise<AiChatSession>;
+  clearAiChatSession(sessionId: number): Promise<AiChatSession>;
+  createAiChatMessage(message: InsertAiChatMessage): Promise<AiChatMessage>;
+  getAiChatMessages(sessionId: number, since?: Date | null): Promise<AiChatMessage[]>;
+  createAiAuditEvent(event: InsertAiAuditEvent): Promise<AiAuditEvent>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -251,6 +281,113 @@ export class DatabaseStorage implements IStorage {
       return await db.select().from(diagnosticReports).where(eq(diagnosticReports.backtestId, backtestId)).orderBy(desc(diagnosticReports.createdAt));
     }
     return await db.select().from(diagnosticReports).orderBy(desc(diagnosticReports.createdAt));
+  }
+
+  async createDiagnosticJob(job: InsertDiagnosticJob): Promise<DiagnosticJob> {
+    const [inserted] = await db.insert(diagnosticJobs).values(job).returning();
+    return inserted;
+  }
+
+  async updateDiagnosticJob(id: string, patch: Partial<DiagnosticJob>): Promise<DiagnosticJob> {
+    const [updated] = await db.update(diagnosticJobs)
+      .set({
+        ...patch,
+        updatedAt: new Date(),
+      } as any)
+      .where(eq(diagnosticJobs.id, id))
+      .returning();
+    return updated;
+  }
+
+  async getDiagnosticJob(id: string): Promise<DiagnosticJob | undefined> {
+    const [job] = await db.select().from(diagnosticJobs).where(eq(diagnosticJobs.id, id));
+    return job;
+  }
+
+  async getDiagnosticJobs(backtestId?: number): Promise<DiagnosticJob[]> {
+    if (backtestId) {
+      return await db.select().from(diagnosticJobs).where(eq(diagnosticJobs.backtestId, backtestId)).orderBy(desc(diagnosticJobs.createdAt));
+    }
+    return await db.select().from(diagnosticJobs).orderBy(desc(diagnosticJobs.createdAt));
+  }
+
+  async getAiChatSessionByKey(sessionKey: string): Promise<AiChatSession | undefined> {
+    const [session] = await db.select().from(aiChatSessions).where(eq(aiChatSessions.sessionKey, sessionKey));
+    return session;
+  }
+
+  async getOrCreateAiChatSession(sessionKey: string, strategyPath: string | null, backtestId: number | null): Promise<AiChatSession> {
+    const existing = await this.getAiChatSessionByKey(sessionKey);
+    if (existing) {
+      const shouldUpdate =
+        (strategyPath && existing.strategyPath !== strategyPath) ||
+        (backtestId != null && existing.backtestId !== backtestId);
+
+      if (!shouldUpdate) return existing;
+
+      const [updated] = await db.update(aiChatSessions)
+        .set({
+          strategyPath: strategyPath ?? existing.strategyPath,
+          backtestId: backtestId ?? existing.backtestId,
+          updatedAt: new Date(),
+        })
+        .where(eq(aiChatSessions.id, existing.id))
+        .returning();
+      return updated;
+    }
+
+    const [inserted] = await db.insert(aiChatSessions)
+      .values({
+        sessionKey,
+        strategyPath: strategyPath ?? null,
+        backtestId: backtestId ?? null,
+      } as any)
+      .returning();
+    return inserted;
+  }
+
+  async clearAiChatSession(sessionId: number): Promise<AiChatSession> {
+    const [updated] = await db.update(aiChatSessions)
+      .set({ clearedAt: new Date(), updatedAt: new Date() })
+      .where(eq(aiChatSessions.id, sessionId))
+      .returning();
+    return updated;
+  }
+
+  async createAiChatMessage(message: InsertAiChatMessage): Promise<AiChatMessage> {
+    const [inserted] = await db.insert(aiChatMessages).values(message).returning();
+    return inserted;
+  }
+
+  async getAiChatMessages(sessionId: number, since?: Date | null): Promise<AiChatMessage[]> {
+<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
+<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
+    const base = db.select().from(aiChatMessages).where(eq(aiChatMessages.sessionId, sessionId));
+    if (since) {
+      return await base.where(gt(aiChatMessages.createdAt, since as any)).orderBy(asc(aiChatMessages.createdAt));
+    }
+    return await base.orderBy(asc(aiChatMessages.createdAt));
+=======
+=======
+>>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
+    const where = since
+      ? and(eq(aiChatMessages.sessionId, sessionId), gt(aiChatMessages.createdAt, since as any))
+      : eq(aiChatMessages.sessionId, sessionId);
+
+    return await db
+      .select()
+      .from(aiChatMessages)
+      .where(where)
+      .orderBy(asc(aiChatMessages.createdAt));
+<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
+>>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
+=======
+>>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
+  }
+
+  async createAiAuditEvent(event: InsertAiAuditEvent): Promise<AiAuditEvent> {
+    const [inserted] = await db.insert(aiAuditEvents).values(event).returning();
+    return inserted;
   }
 }
 

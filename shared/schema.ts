@@ -41,9 +41,68 @@ export const diagnosticReports = pgTable("diagnostic_reports", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const diagnosticJobs = pgTable("diagnostic_jobs", {
+  id: text("id").primaryKey(),
+  backtestId: integer("backtest_id").references(() => backtests.id).notNull(),
+  strategyPath: text("strategy_path"),
+  status: text("status").notNull(),
+  progress: jsonb("progress"),
+  error: text("error"),
+  reportId: text("report_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const aiChatSessions = pgTable("ai_chat_sessions", {
+  id: serial("id").primaryKey(),
+  sessionKey: text("session_key").notNull().unique(),
+  strategyPath: text("strategy_path"),
+  backtestId: integer("backtest_id").references(() => backtests.id),
+  clearedAt: timestamp("cleared_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const aiChatMessages = pgTable("ai_chat_messages", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => aiChatSessions.id).notNull(),
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  model: text("model"),
+  request: jsonb("request"),
+  response: jsonb("response"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const aiAuditEvents = pgTable("ai_audit_events", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => aiChatSessions.id),
+  eventType: text("event_type").notNull(),
+  payload: jsonb("payload").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertDiagnosticReportSchema = createInsertSchema(diagnosticReports).omit({ id: true, createdAt: true });
 export type DiagnosticReport = typeof diagnosticReports.$inferSelect;
 export type InsertDiagnosticReport = z.infer<typeof insertDiagnosticReportSchema>;
+
+export const insertDiagnosticJobSchema = createInsertSchema(diagnosticJobs).omit({ createdAt: true, startedAt: true, finishedAt: true, updatedAt: true });
+export type DiagnosticJob = typeof diagnosticJobs.$inferSelect;
+export type InsertDiagnosticJob = z.infer<typeof insertDiagnosticJobSchema>;
+
+export const insertAiChatSessionSchema = createInsertSchema(aiChatSessions).omit({ id: true, createdAt: true, updatedAt: true });
+export type AiChatSession = typeof aiChatSessions.$inferSelect;
+export type InsertAiChatSession = z.infer<typeof insertAiChatSessionSchema>;
+
+export const insertAiChatMessageSchema = createInsertSchema(aiChatMessages).omit({ id: true, createdAt: true });
+export type AiChatMessage = typeof aiChatMessages.$inferSelect;
+export type InsertAiChatMessage = z.infer<typeof insertAiChatMessageSchema>;
+
+export const insertAiAuditEventSchema = createInsertSchema(aiAuditEvents).omit({ id: true, createdAt: true });
+export type AiAuditEvent = typeof aiAuditEvents.$inferSelect;
+export type InsertAiAuditEvent = z.infer<typeof insertAiAuditEventSchema>;
 
 // === SCHEMAS ===
 export const insertFileSchema = createInsertSchema(files).omit({ id: true, lastModified: true });
