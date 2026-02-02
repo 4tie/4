@@ -252,6 +252,13 @@ export interface StatisticalRobustnessReport {
   redFlags: string[];
 }
 
+export interface FailureSignalsReport {
+  primaryFailureReason: string;
+  mainKillerMetric: string;
+  secondaryIssues: string[];
+  recommendedChangeTypes: string[];
+}
+
 export interface DiagnosticReport {
   metadata: {
     reportId: string;
@@ -287,6 +294,9 @@ export interface DiagnosticReport {
   };
   phase9?: {
     statistics: StatisticalRobustnessReport;
+  };
+  phase11?: {
+    failureSignals: FailureSignalsReport;
   };
   summary: {
     primaryLossDriver: string;

@@ -162,9 +162,9 @@ function HelpItemsBlock({ items }: { items: HelpItem[] }) {
 }
 
 export function DiagnosticReportView({ report }: DiagnosticReportViewProps) {
-  if (!report) return null;
+  if (!report) return null
 
-  const { metadata, phase1, phase2, phase3, phase4, phase5, phase6, phase7, phase8, phase9, summary } = report;
+  const { metadata, phase1, phase2, phase3, phase4, phase5, phase6, phase7, phase8, phase9, phase11, summary } = report;
   const { structuralIntegrity } = phase1;
   const performance = phase2?.performance;
   const drawdownRisk = phase3?.drawdownRisk;
@@ -174,6 +174,7 @@ export function DiagnosticReportView({ report }: DiagnosticReportViewProps) {
   const costAnalysis = phase7?.costAnalysis;
   const logicIntegrity = phase8?.logicIntegrity;
   const statistics = phase9?.statistics;
+  const failureSignals = phase11?.failureSignals;
 
   const pct = (v: any) => {
     const n = Number(v);
@@ -1187,6 +1188,58 @@ export function DiagnosticReportView({ report }: DiagnosticReportViewProps) {
           <HelpItemsBlock items={phase1HelpItems} />
         </CardContent>
       </Card>
+
+      {failureSignals && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              Phase 11: Failure Signals
+              <Badge variant="outline" className="ml-auto">
+                Killer: {String(failureSignals.mainKillerMetric || "-")}
+              </Badge>
+            </CardTitle>
+            <CardDescription>
+              Deterministic symptoms + recommended change types (no AI / no guessing).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <div className="text-sm font-semibold">Primary failure reason</div>
+                <div className="text-xs text-muted-foreground">{String(failureSignals.primaryFailureReason || "-")}</div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-sm font-semibold">Recommended change types</div>
+                <div className="flex flex-wrap gap-2">
+                  {Array.isArray(failureSignals.recommendedChangeTypes) && failureSignals.recommendedChangeTypes.length ? (
+                    failureSignals.recommendedChangeTypes.slice(0, 18).map((t: string, i: number) => (
+                      <Badge key={`${t}-${i}`} variant="outline" className="text-xs">
+                        {t}
+                      </Badge>
+                    ))
+                  ) : (
+                    <span className="text-xs text-muted-foreground">-</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {Array.isArray(failureSignals.secondaryIssues) && failureSignals.secondaryIssues.length > 0 && (
+              <div className="p-3 bg-muted/20 rounded-md border border-border/50">
+                <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  Secondary issues
+                </h4>
+                <ul className="text-xs list-disc list-inside space-y-1">
+                  {failureSignals.secondaryIssues.slice(0, 12).map((s: string, i: number) => (
+                    <li key={i} className="text-muted-foreground">{String(s)}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {performance && (
         <Card>

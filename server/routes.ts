@@ -16,6 +16,7 @@ import { Phase7Costs } from "./utils/backtest-diagnostic/phase7-costs";
 import { Phase8Logic } from "./utils/backtest-diagnostic/phase8-logic";
 import { Phase9Statistics } from "./utils/backtest-diagnostic/phase9-statistics";
 import { Phase10Report } from "./utils/backtest-diagnostic/phase10-report";
+import { Phase11Signals } from "./utils/backtest-diagnostic/phase11-signals";
 import { BacktestParser } from "./utils/backtest-diagnostic/parser";
 import { v4 as uuidv4 } from "uuid";
 
@@ -774,6 +775,17 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
       const phase9 = new Phase9Statistics();
       const statisticsReport = phase9.analyze(backtestData);
 
+      const phase11 = new Phase11Signals();
+      const failureSignalsReport = phase11.analyze({
+        phase1: { structuralIntegrity: structuralReport },
+        phase2: { performance: performanceReport },
+        phase3: { drawdownRisk: drawdownRiskReport },
+        phase6: { regimeAnalysis: regimeAnalysisReport },
+        phase7: { costAnalysis: costAnalysisReport },
+        phase8: { logicIntegrity: logicIntegrityReport },
+        phase9: { statistics: statisticsReport },
+      });
+
       const phase10 = new Phase10Report();
       const finalSummary = phase10.analyze({
         phase1: { structuralIntegrity: structuralReport },
@@ -823,6 +835,9 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         },
         phase9: {
           statistics: statisticsReport
+        },
+        phase11: {
+          failureSignals: failureSignalsReport
         },
         summary: finalSummary
       };
