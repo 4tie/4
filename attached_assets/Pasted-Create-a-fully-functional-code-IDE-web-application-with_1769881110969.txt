@@ -1,0 +1,64 @@
+Create a fully functional code IDE web application with the following specifications:
+
+Build a comprehensive development environment that includes:
+
+AI Integration Section:
+- Implement AI assistance using only free models available on OpenRouter API
+- Include model selection dropdown with available free models (such as Qwen, Llama variants, and other free-tier models)
+- Add chat interface for AI interactions with syntax-highlighted code responses
+- Integrate AI code generation, completion, and explanation features
+- Store API key securely in local storage with clear option to update it
+- Handle API errors gracefully with user-friendly messages
+
+Main IDE Tab:
+- Create a full-featured code editor with syntax highlighting for Python
+- Implement file browser sidebar showing project structure
+- Add functionality to create, open, save, and delete files
+- Include tabs for multiple open files
+- Implement find and replace functionality
+- Add auto-indentation and bracket matching
+- Include line numbers and code folding
+- Support keyboard shortcuts for common operations (Ctrl+S, Ctrl+F, etc.)
+
+Freqtrade Backtesting Tab:
+- Add dedicated section for Freqtrade strategy development and testing
+- Create strategy file template with proper Freqtrade structure
+- Implement syntax highlighting specific to Freqtrade indicators and functions
+- Add backtesting configuration panel with settings for:
+  - Timeframes (1m, 5m, 15m, 1h, 4h, 1d)
+  - Date ranges for testing
+  - Initial stake amounts
+  - Stop loss and take profit percentages
+  - Pair selection
+- Integrate backtest execution with real-time progress display
+- Show console output during backtest execution
+
+Results Tab:
+- Display backtesting results in organized dashboard format
+- Show key metrics: total trades, win rate, profit percentage, drawdown
+- Include equity curve chart
+- Display individual trade list with entry/exit prices and P&L
+- Show buy/sell signal markers on price chart
+- Export results to CSV format
+- Include trade history timeline visualization
+
+CLI Terminal:
+- Implement command-line interface at the bottom of the application
+- Support command history (up/down arrows)
+- Include common commands: run backtest, validate strategy, list strategies
+- Display command output with proper formatting
+- Allow switching between different terminal sessions
+- Add clear input field with command suggestions
+
+Technical Requirements:
+- Use React or Vue.js as frontend framework
+- Implement Monaco Editor or CodeMirror for code editing
+- Create RESTful API backend using Python (Flask or FastAPI)
+- Store strategies and configurations in local file system
+- Use Chart.js or similar library for data visualization
+- Implement proper error handling and logging
+- Add loading states for all async operations
+- Ensure responsive design for different screen sizes
+- Make the application fully functional without any mock data
+
+The application should be ready to deploy locally with all features working including actual OpenRouter API calls, real Freqtrade backtesting execution, and genuine CLI command processing.
