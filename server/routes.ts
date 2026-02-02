@@ -298,6 +298,118 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
+  app.post(api.strategies.params.path, async (req, res) => {
+    try {
+      const { strategyPath } = api.strategies.params.input.parse(req.body);
+      const projectRoot = process.cwd();
+      const venvBin = path.join(projectRoot, ".venv", "bin");
+      const pythonBin = path.join(venvBin, "python");
+      const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "param_tools.py");
+
+      if (!strategyPath.startsWith("user_data/strategies/")) {
+        return res.status(400).json({ message: "strategyPath must be under user_data/strategies/" });
+      }
+
+      const absStrategy = resolvePathWithinProject(strategyPath);
+
+      await fs.access(pythonBin);
+      await fs.access(scriptPath);
+
+      const env = {
+        ...process.env,
+        VIRTUAL_ENV: path.join(projectRoot, ".venv"),
+        PATH: process.env.PATH ? `${venvBin}:${process.env.PATH}` : venvBin,
+      };
+
+      const proc = spawn(pythonBin, [scriptPath, "extract", absStrategy], { cwd: projectRoot, env });
+      let out = "";
+      let err = "";
+      proc.stdout.on("data", (d) => (out += d.toString()));
+      proc.stderr.on("data", (d) => (err += d.toString()));
+
+      proc.on("close", (code) => {
+        if (code !== 0) {
+          return res.status(500).json({ message: "Failed to extract parameters", details: err || out });
+        }
+        try {
+          const parsed = JSON.parse(out);
+          return res.json(parsed);
+        } catch {
+          return res.status(500).json({ message: "Invalid parser output", details: err || out });
+        }
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post(api.strategies.applyParams.path, async (req, res) => {
+    try {
+      const { strategyPath, changes } = api.strategies.applyParams.input.parse(req.body);
+
+      const projectRoot = process.cwd();
+      const venvBin = path.join(projectRoot, ".venv", "bin");
+      const pythonBin = path.join(venvBin, "python");
+      const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "param_tools.py");
+
+      if (!strategyPath.startsWith("user_data/strategies/")) {
+        return res.status(400).json({ message: "strategyPath must be under user_data/strategies/" });
+      }
+
+      const absStrategy = resolvePathWithinProject(strategyPath);
+
+      await fs.access(pythonBin);
+      await fs.access(scriptPath);
+
+      const env = {
+        ...process.env,
+        VIRTUAL_ENV: path.join(projectRoot, ".venv"),
+        PATH: process.env.PATH ? `${venvBin}:${process.env.PATH}` : venvBin,
+      };
+
+      const proc = spawn(pythonBin, [scriptPath, "apply", absStrategy], {
+        cwd: projectRoot,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      let out = "";
+      let err = "";
+      proc.stdout.on("data", (d) => (out += d.toString()));
+      proc.stderr.on("data", (d) => (err += d.toString()));
+
+      proc.stdin.write(JSON.stringify({ changes }));
+      proc.stdin.end();
+
+      proc.on("close", async (code) => {
+        if (code !== 0) {
+          return res.status(400).json({ message: "Rejected change(s)", details: err || out });
+        }
+
+        try {
+          await storage.syncWithFilesystem();
+        } catch (e: any) {
+          return res.status(500).json({ message: "Applied but failed to sync filesystem", details: e?.message || String(e) });
+        }
+
+        try {
+          const parsed = JSON.parse(out);
+          return res.json(parsed);
+        } catch {
+          return res.json({ success: true });
+        }
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // === Backtests Endpoints ===
   app.get(api.backtests.list.path, async (req, res) => {
     const backtests = await storage.getBacktests();

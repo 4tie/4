@@ -110,6 +110,51 @@ export const api = {
       },
     },
   },
+  strategies: {
+    params: {
+      method: 'POST' as const,
+      path: '/api/strategies/params',
+      input: z.object({
+        strategyPath: z.string(),
+      }),
+      responses: {
+        200: z.object({
+          params: z.array(z.object({
+            name: z.string(),
+            type: z.string(),
+            line: z.number(),
+            endLine: z.number(),
+            args: z.array(z.any()),
+            default: z.any(),
+            space: z.any(),
+            optimize: z.any(),
+            before: z.string(),
+          })),
+        }),
+        400: errorSchemas.validation,
+        500: errorSchemas.internal,
+      },
+    },
+    applyParams: {
+      method: 'POST' as const,
+      path: '/api/strategies/params/apply',
+      input: z.object({
+        strategyPath: z.string(),
+        changes: z.array(z.object({
+          name: z.string(),
+          before: z.string(),
+          after: z.string(),
+        })),
+      }),
+      responses: {
+        200: z.object({
+          success: z.boolean().optional(),
+        }).passthrough(),
+        400: errorSchemas.validation,
+        500: errorSchemas.internal,
+      },
+    },
+  },
   ai: {
     models: {
       method: 'GET' as const,
