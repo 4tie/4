@@ -8,6 +8,7 @@ import { TerminalPanel } from "@/components/TerminalPanel";
 import { BacktestDashboard } from "@/components/BacktestDashboard";
 import { ChatPanel, ChatToggleButton } from "@/components/ChatPanel";
 import { BacktestResults } from "@/components/BacktestResults";
+import { StrategyParamsDialog } from "@/components/StrategyParamsDialog";
 import { useFile, useUpdateFile } from "@/hooks/use-files";
 import { useBacktest, useBacktests } from "@/hooks/use-backtests";
 import { useUpdateConfig } from "@/hooks/use-config";
@@ -30,6 +31,7 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [editorState, setEditorState] = useState<EditorState>({ selectedCode: "", lineNumber: 1 });
   const editorRef = useRef<CodeEditorHandle>(null);
+  const [paramsOpen, setParamsOpen] = useState(false);
   
   const { data: backtests } = useBacktests();
   const backtestById = (id: number | null) => {
@@ -108,6 +110,11 @@ export default function Home() {
   const updateFile = useUpdateFile();
   const updateConfig = useUpdateConfig();
 
+  const activeFilePath = typeof (activeFile as any)?.path === "string" ? String((activeFile as any).path) : null;
+  const isStrategyFile = Boolean(
+    activeFilePath && activeFilePath.startsWith("user_data/strategies/") && activeFilePath.endsWith(".py"),
+  );
+
   // Local state for editor content to handle unsaved changes
   const [editorContent, setEditorContent] = useState("");
   const [isDirty, setIsDirty] = useState(false);
@@ -118,6 +125,10 @@ export default function Home() {
       setIsDirty(false);
     }
   }, [activeFile]);
+
+  useEffect(() => {
+    setParamsOpen(false);
+  }, [activeFileId]);
 
   useEffect(() => {
     const p = (activeFile as any)?.path;
@@ -389,6 +400,17 @@ export default function Home() {
                               {updateFile.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
                               Save
                             </Button>
+                            {isStrategyFile && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 text-xs gap-1.5"
+                                onClick={() => setParamsOpen(true)}
+                              >
+                                <Scale className="w-3 h-3" />
+                                Params
+                              </Button>
+                            )}
                             {activeFile.type === 'python' && (
                               <Button 
                                 variant="default" 
@@ -410,6 +432,11 @@ export default function Home() {
 
                     {/* Editor Content */}
                     <div className="flex-1 overflow-hidden relative bg-[#1e1e1e]">
+                      <StrategyParamsDialog
+                        open={paramsOpen}
+                        onOpenChange={setParamsOpen}
+                        strategyPath={isStrategyFile ? activeFilePath : null}
+                      />
                       {activeFile ? (
                         fileLoading ? (
                           <div className="absolute inset-0 flex items-center justify-center">
