@@ -52,6 +52,11 @@ function applyBacktestOverridesToConfig(baseConfig: any, runInput: any) {
   const next = baseConfig && typeof baseConfig === "object" ? JSON.parse(JSON.stringify(baseConfig)) : {};
   const cfg = runInput?.config && typeof runInput.config === "object" ? runInput.config : {};
 
+  const strategyPath = typeof runInput?.strategyName === "string" ? String(runInput.strategyName) : "";
+  if (strategyPath.trim()) {
+    next.strategy = path.basename(strategyPath).replace(/\.py$/i, "");
+  }
+
   if (typeof cfg.timeframe === "string" && cfg.timeframe.trim()) {
     next.timeframe = cfg.timeframe;
   }
@@ -65,6 +70,8 @@ function applyBacktestOverridesToConfig(baseConfig: any, runInput: any) {
 
   if (typeof cfg.stoploss === "number" && Number.isFinite(cfg.stoploss)) {
     next.stoploss = cfg.stoploss;
+  } else {
+    delete (next as any).stoploss;
   }
 
   if (typeof cfg.max_open_trades === "number" && Number.isFinite(cfg.max_open_trades) && cfg.max_open_trades >= 0) {
@@ -97,9 +104,13 @@ function applyBacktestOverridesToConfig(baseConfig: any, runInput: any) {
     }
     next.exchange.pair_whitelist = cfg.pairs;
 
-    if (Array.isArray(next.pairlists) && next.pairlists[0] && typeof next.pairlists[0] === "object") {
-      next.pairlists[0].pair_whitelist = cfg.pairs;
-    }
+    next.pairlists = [
+      {
+        method: "StaticPairList",
+        pair_whitelist: cfg.pairs,
+        pair_blacklist: Array.isArray(next.exchange.pair_blacklist) ? next.exchange.pair_blacklist : [],
+      },
+    ];
   }
 
   return next;
@@ -861,7 +872,7 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
       }
 
       const phase1 = new Phase1Structural();
-      const structuralReport = await phase1.analyze(backtestData, strategyContent);
+      const structuralReport = await phase1.analyze(backtestData, strategyContent, { backtestId });
 
       const phase2 = new Phase2Performance();
       const performanceReport = phase2.analyze(backtestData);
@@ -1096,6 +1107,19 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
       const venvBin = path.join(projectRoot, ".venv", "bin");
       const freqtradeBin = path.join(venvBin, "freqtrade");
       await fs.access(freqtradeBin);
+
+      let exchangeName = "binance";
+      try {
+        const rawCfg = await fs.readFile(path.join(projectRoot, "user_data", "config.json"), "utf-8");
+        const parsed = JSON.parse(rawCfg);
+        const ex = parsed?.exchange?.name;
+        if (typeof ex === "string" && ex.trim().length > 0) {
+          exchangeName = ex.trim();
+        }
+      } catch {
+        // ignore
+      }
+
       const env = {
         ...process.env,
         VIRTUAL_ENV: path.join(projectRoot, ".venv"),
@@ -1125,6 +1149,10 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         "-t",
         ...input.timeframes,
       ];
+
+      if (typeof input.date_from === "string" && input.date_from.trim()) {
+        args.push("--prepend");
+      }
 
       if (timerange) {
         args.push("--timerange", timerange);
@@ -1156,12 +1184,54 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         finish(500, { message: "Failed to start download-data command" });
       });
 
-      proc.on("close", (code) => {
+      proc.on("close", async (code) => {
+        let missing: Array<{ pair: string; timeframe: string }> = [];
+        if (code === 0) {
+          const dataDir = path.join(projectRoot, "user_data", "data", exchangeName);
+          const pairs = Array.isArray(input.pairs) ? input.pairs : [];
+          const timeframes = Array.isArray(input.timeframes) ? input.timeframes : [];
+
+          const checks: Array<Promise<void>> = [];
+          for (const pair of pairs) {
+            const pairFileBase = String(pair).replace(/\//g, "_");
+            for (const tf of timeframes) {
+              const timeframe = String(tf);
+              checks.push(
+                (async () => {
+                  const jsonPath = path.join(dataDir, `${pairFileBase}-${timeframe}.json`);
+                  const featherPath = path.join(dataDir, `${pairFileBase}-${timeframe}.feather`);
+                  try {
+                    await fs.access(jsonPath);
+                    return;
+                  } catch {
+                    // ignore
+                  }
+                  try {
+                    await fs.access(featherPath);
+                    return;
+                  } catch {
+                    // ignore
+                  }
+                  missing.push({ pair: String(pair), timeframe });
+                })()
+              );
+            }
+          }
+
+          try {
+            await Promise.all(checks);
+          } catch {
+            // ignore
+          }
+        }
+
         finish(200, {
           success: code === 0,
           code,
           command,
           output,
+          exchange: exchangeName,
+          missing,
         });
       });
     } catch (err) {
@@ -1253,6 +1323,19 @@ async function runActualBacktest(backtestId: number, config: any) {
     const runConfigPath = path.join(runExportDir, "run-config.json");
     await fs.writeFile(runConfigPath, JSON.stringify(effectiveConfig, null, 2), "utf-8");
     const runConfigRel = path.relative(projectRoot, runConfigPath);
+
+    try {
+      const pairs = Array.isArray((effectiveConfig as any)?.exchange?.pair_whitelist)
+        ? ((effectiveConfig as any).exchange.pair_whitelist as any[]).map((p) => String(p)).filter((p) => p.trim().length > 0)
+        : [];
+      if (pairs.length) {
+        const head = pairs.slice(0, 12);
+        const tail = pairs.length > head.length ? ` ... (+${pairs.length - head.length} more)` : "";
+        await storage.appendBacktestLog(backtestId, `\nPairs selected: ${pairs.length}\n${head.join(", ")}${tail}\n`);
+      }
+    } catch {
+      // best-effort
+    }
 
     // Build the freqtrade backtest command
     const cmdParts = [
@@ -1389,6 +1472,7 @@ async function runActualBacktest(backtestId: number, config: any) {
                   exit_reason: t?.exit_reason,
                   stake_amount: t?.stake_amount,
                   amount: t?.amount,
+                  profit_abs: Number(t?.profit_abs ?? 0),
                 }))
                 .filter((t: any) => t.pair);
 
@@ -1396,11 +1480,18 @@ async function runActualBacktest(backtestId: number, config: any) {
               const winners = trades.filter((t: any) => Number.isFinite(t.profit_ratio) && t.profit_ratio > 0).length;
               const win_rate = total_trades > 0 ? winners / total_trades : 0;
 
-              const stakeAmount = Number(config?.config?.stake_amount ?? 1000);
-              const startEquity = Number.isFinite(stakeAmount) && stakeAmount > 0 ? stakeAmount : 1000;
-              let equity = startEquity;
-              let peak = startEquity;
-              let max_drawdown = 0;
+              const stats = strat && typeof strat === "object" ? strat : {};
+
+              const startBalanceRaw = Number(stats?.starting_balance ?? stats?.dry_run_wallet);
+              const startBalance = Number.isFinite(startBalanceRaw) && startBalanceRaw > 0 ? startBalanceRaw : 0;
+
+              // Freqtrade already provides per-trade profit_abs. Use it to build a simple equity curve.
+              // This avoids incorrectly compounding profit_ratio against the entire wallet.
+              let equity = startBalance;
+              let peak = startBalance;
+
+              const maxDrawdownRaw = Number(stats?.max_drawdown_account ?? stats?.max_drawdown);
+              const max_drawdown = Number.isFinite(maxDrawdownRaw) ? maxDrawdownRaw : 0;
 
               const equityCurve: Array<{
                 idx: number;
@@ -1416,18 +1507,16 @@ async function runActualBacktest(backtestId: number, config: any) {
 
               for (const tr of trades) {
                 const r = Number.isFinite(tr.profit_ratio) ? tr.profit_ratio : 0;
+                const profitAbs = Number.isFinite((tr as any).profit_abs) ? Number((tr as any).profit_abs) : 0;
                 const equityBefore = equity;
-                const profitAbs = equityBefore * r;
-                const equityAfter = equityBefore * (1 + r);
+                const equityAfter = equityBefore + profitAbs;
 
                 (tr as any).equity_before = equityBefore;
                 (tr as any).equity_after = equityAfter;
-                (tr as any).profit_abs = profitAbs;
 
                 equity = equityAfter;
                 if (equity > peak) peak = equity;
                 const dd = peak > 0 ? (peak - equity) / peak : 0;
-                if (dd > max_drawdown) max_drawdown = dd;
 
                 equityCurve.push({
                   idx: equityCurve.length,
@@ -1456,8 +1545,27 @@ async function runActualBacktest(backtestId: number, config: any) {
                 );
               }
 
-              const profit_total = startEquity > 0 ? equity / startEquity - 1 : 0;
-              const profit_abs_total = equity - startEquity;
+              const endBalanceRaw = Number(stats?.final_balance);
+              const endBalance = Number.isFinite(endBalanceRaw) ? endBalanceRaw : equity;
+
+              const profitAbsTotalRaw = Number(stats?.profit_total_abs);
+              const profit_abs_total = Number.isFinite(profitAbsTotalRaw) ? profitAbsTotalRaw : (endBalance - startBalance);
+
+              const profitTotalRaw = Number(stats?.profit_total);
+              const profit_total = Number.isFinite(profitTotalRaw) ? profitTotalRaw : (startBalance > 0 ? profit_abs_total / startBalance : 0);
+
+              const pairsRequested = Array.isArray((effectiveConfig as any)?.exchange?.pair_whitelist)
+                ? ((effectiveConfig as any).exchange.pair_whitelist as any[]).map((p) => String(p)).filter((p) => p.trim().length > 0)
+                : [];
+              const pairsUsed = Array.isArray(stats?.pairlist)
+                ? (stats.pairlist as any[]).map((p) => String(p)).filter((p) => p.trim().length > 0)
+                : [];
+              const excludedPairs = pairsRequested.length && pairsUsed.length
+                ? pairsRequested.filter((p) => !pairsUsed.includes(p))
+                : [];
+              if (excludedPairs.length) {
+                await storage.appendBacktestLog(backtestId, `\n⚠ Some selected pairs were not used (missing data or excluded): ${excludedPairs.join(", ")}\n`);
+              }
 
               const results = {
                 total_trades,
@@ -1465,9 +1573,12 @@ async function runActualBacktest(backtestId: number, config: any) {
                 profit_total,
                 profit_abs_total,
                 max_drawdown,
-                start_balance: startEquity,
-                end_balance: equity,
+                start_balance: startBalance,
+                end_balance: endBalance,
                 trades,
+                pairs_requested: pairsRequested,
+                pairs_used: pairsUsed,
+                pairs_excluded: excludedPairs,
               };
 
               await fs.writeFile(resultsPath, JSON.stringify(results, null, 2), "utf-8");

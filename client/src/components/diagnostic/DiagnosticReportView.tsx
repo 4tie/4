@@ -198,13 +198,27 @@ export function DiagnosticReportView({ report }: DiagnosticReportViewProps) {
     return pct(v);
   };
 
+  const verdictVariant = (v: any) => {
+    const s = String(v || "").toUpperCase();
+    if (s === "PASS") return "outline";
+    if (s === "WARN") return "secondary";
+    return "destructive";
+  };
+
+  const verdictIcon = (v: any) => {
+    const s = String(v || "").toUpperCase();
+    if (s === "PASS") return <CheckCircle2 className="w-4 h-4 text-green-500" />;
+    if (s === "WARN") return <AlertTriangle className="w-4 h-4 text-yellow-500" />;
+    return <AlertTriangle className="w-4 h-4 text-red-500" />;
+  };
+
   const phase1HelpItems = (() => {
     const items: HelpItem[] = [];
     const dc = structuralIntegrity?.dataContinuity;
     const lb = structuralIntegrity?.lookAheadBias;
     const lf = structuralIntegrity?.logicFeasibility;
 
-    if (dc?.verdict === "FAIL") {
+    if (dc?.verdict === "FAIL" || dc?.verdict === "WARN") {
       const details = String(dc?.details || "");
 
       if (details.toLowerCase().includes("no trades found")) {
@@ -231,14 +245,13 @@ export function DiagnosticReportView({ report }: DiagnosticReportViewProps) {
         });
       } else if (Number(dc?.gapCount) > 0) {
         items.push({
-          title: "Phase 1.1: Data Continuity (Large gaps)",
-          meaningEn: `The app detected unusually large time gaps between trades (count: ${Number(dc?.gapCount)}, largest: ${Number(dc?.largestGapMinutes).toFixed(0)} min). This can indicate missing market data, timerange gaps, or simply a strategy that does not trade for long periods.`,
-          meaningAr: `تم اكتشاف فجوات زمنية كبيرة وغير معتادة بين الصفقات (العدد: ${Number(dc?.gapCount)}، أكبر فجوة: ${Number(dc?.largestGapMinutes).toFixed(0)} دقيقة). قد يدل ذلك على نقص بيانات السوق، أو فجوات في الفترة الزمنية، أو أن الاستراتيجية لا تتداول لفترات طويلة.`,
+          title: `Phase 1.1: Data Continuity (Large gaps${String(dc?.verdict || "").toUpperCase() === "WARN" ? " - warning" : ""})`,
+          meaningEn: `The app detected unusually large time gaps between trades (count: ${Number(dc?.gapCount)}, largest: ${Number(dc?.largestGapMinutes).toFixed(0)} min). This can indicate missing market data/timerange gaps, or simply a strategy that does not trade for long periods. If OHLCV continuity is verified and no files are missing, this is usually just strategy inactivity.`,
+          meaningAr: `تم اكتشاف فجوات زمنية كبيرة وغير معتادة بين الصفقات (العدد: ${Number(dc?.gapCount)}، أكبر فجوة: ${Number(dc?.largestGapMinutes).toFixed(0)} دقيقة). قد يدل ذلك على نقص بيانات السوق/فجوات الفترة، أو ببساطة أن الاستراتيجية لا تتداول لفترات طويلة. إذا كانت استمرارية OHLCV مؤكدة ولا توجد ملفات مفقودة فغالبًا هذا مجرد عدم نشاط للاستراتيجية.`,
           fixEn: [
             "Confirm whether your strategy is expected to be inactive during that period (this can be normal).",
             "Verify your timerange is continuous and matches available data.",
             "Re-download OHLCV data for the exact pairs and timeframe used in the backtest, then rerun.",
-            "Check for timeframe mismatch (e.g., data downloaded for 1h but backtest runs on 4h).",
           ],
         });
       } else {
@@ -1143,7 +1156,7 @@ export function DiagnosticReportView({ report }: DiagnosticReportViewProps) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             Phase 1: Structural Integrity
-            <Badge variant={structuralIntegrity.verdict === "PASS" ? "outline" : "destructive"} className="ml-auto">
+            <Badge variant={verdictVariant(structuralIntegrity.verdict)} className="ml-auto">
               {structuralIntegrity.verdict}
             </Badge>
           </CardTitle>
@@ -1155,30 +1168,21 @@ export function DiagnosticReportView({ report }: DiagnosticReportViewProps) {
           <div className="space-y-2">
             <div className="flex items-center justify-between text-sm">
               <span className="flex items-center gap-2">
-                {structuralIntegrity.dataContinuity.verdict === "PASS" ? 
-                  <CheckCircle2 className="w-4 h-4 text-green-500" /> : 
-                  <AlertTriangle className="w-4 h-4 text-red-500" />
-                }
+                {verdictIcon(structuralIntegrity.dataContinuity.verdict)}
                 Data Continuity
               </span>
               <span className="text-muted-foreground">{structuralIntegrity.dataContinuity.details}</span>
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="flex items-center gap-2">
-                {structuralIntegrity.lookAheadBias.verdict === "PASS" ? 
-                  <CheckCircle2 className="w-4 h-4 text-green-500" /> : 
-                  <AlertTriangle className="w-4 h-4 text-red-500" />
-                }
+                {verdictIcon(structuralIntegrity.lookAheadBias.verdict)}
                 Look-ahead Bias
               </span>
               <span className="text-muted-foreground">{structuralIntegrity.lookAheadBias.details}</span>
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="flex items-center gap-2">
-                {structuralIntegrity.logicFeasibility.verdict === "PASS" ? 
-                  <CheckCircle2 className="w-4 h-4 text-green-500" /> : 
-                  <AlertTriangle className="w-4 h-4 text-red-500" />
-                }
+                {verdictIcon(structuralIntegrity.logicFeasibility.verdict)}
                 Logic Feasibility
               </span>
               <span className="text-muted-foreground">{structuralIntegrity.logicFeasibility.details}</span>

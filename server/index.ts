@@ -126,7 +126,7 @@ app.use((req, res, next) => {
   const isReplit = Boolean(process.env.REPL_ID || process.env.REPL_SLUG || process.env.REPLIT_DEPLOYMENT);
   const defaultPort = isReplit ? 5000 : 5173;
   const port = parseInt(process.env.PORT || String(defaultPort), 10);
-  const host = process.env.HOST || "0.0.0.0";
+  const host = process.env.HOST || "100.67.174.2";
   const strictPort = process.env.STRICT_PORT === "1";
 
   const listenWithFallback = (startPort: number, attempts: number) => {

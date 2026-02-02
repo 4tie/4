@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Checkbox } from "@/components/ui/checkbox";
 import { useBacktest, useBacktests, useRunBacktest, useRunBacktestBatch } from "@/hooks/use-backtests";
 import { useFiles } from "@/hooks/use-files";
-import { useUpdateConfig, useGetConfig, useDownloadData } from "@/hooks/use-config";
+import { useGetConfig, useDownloadData } from "@/hooks/use-config";
 import { Timeframes, type WidgetConfig, type WidgetId } from "@shared/schema";
 import { AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, ComposedChart } from 'recharts';
 import { Download, Loader2, TrendingUp, TrendingDown, Percent, DollarSign, Activity, Check, ChevronsUpDown, Eye, EyeOff, GripVertical, Settings2, BarChart3, LineChart as LineChartIcon, Calendar, X, Save as SaveIcon } from "lucide-react";
@@ -49,6 +49,8 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
   const completionNotifiedRef = useRef<number | null>(null);
   const lastNotifiedStrategyRef = useRef<string | null>(null);
   const suppressStrategyNotifyRef = useRef(false);
+  const maxOpenTradesManualRef = useRef(false);
+  const maxOpenTradesAutoRef = useRef<number | null>(null);
 
   const { data: streamBacktest } = useBacktest(streamBacktestId);
 
@@ -68,8 +70,18 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
     return date.toISOString().split('T')[0];
   };
 
+  const [savedFormData] = useState<any | null>(() => {
+    if (typeof window === "undefined") return null;
+    const raw = window.localStorage.getItem("backtestFormData");
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  });
+
   const { data: configData, isLoading: configLoading } = useGetConfig();
-  const updateConfig = useUpdateConfig();
   const downloadData = useDownloadData();
 
   const availablePairs = useMemo(() => {
@@ -133,6 +145,22 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
   const sortedWidgets = useMemo(() => [...widgetPrefs].sort((a, b) => a.order - b.order), [widgetPrefs]);
 
   const defaultValues = useMemo(() => {
+    if (savedFormData) {
+      const rawCfg = (savedFormData as any)?.config;
+      const cfg = rawCfg && typeof rawCfg === "object" ? rawCfg : {};
+      const includeStoploss =
+        typeof (cfg as any).include_stoploss === "boolean"
+          ? Boolean((cfg as any).include_stoploss)
+          : (typeof (cfg as any).stoploss === "number" && Number.isFinite((cfg as any).stoploss));
+      return {
+        ...savedFormData,
+        config: {
+          ...cfg,
+          include_stoploss: includeStoploss,
+          stoploss: includeStoploss ? (cfg as any).stoploss : undefined,
+        },
+      };
+    }
     if (!configData) {
       return {
         strategyName: "",
@@ -143,7 +171,8 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
           stake_amount: 1000,
           max_open_trades: 1,
           tradable_balance_ratio: 1,
-          stoploss: -0.1,
+          include_stoploss: false,
+          stoploss: undefined,
           trailing_stop: false,
           trailing_stop_positive: 0.01,
           trailing_stop_positive_offset: 0.02,
@@ -170,7 +199,8 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
             : parseFloat(String((configData as any)?.stake_amount ?? "")) || 1000,
         max_open_trades: Number((configData as any)?.max_open_trades ?? 1),
         tradable_balance_ratio: Number((configData as any)?.tradable_balance_ratio ?? 1),
-        stoploss: Number((configData as any)?.stoploss ?? -0.1),
+        include_stoploss: false,
+        stoploss: undefined,
         trailing_stop: Boolean((configData as any)?.trailing_stop ?? false),
         trailing_stop_positive: Number((configData as any)?.trailing_stop_positive ?? 0.01),
         trailing_stop_positive_offset: Number((configData as any)?.trailing_stop_positive_offset ?? 0.02),
@@ -226,23 +256,6 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
     onStrategySelected?.(s);
   }, [onStrategySelected, watchedStrategyName]);
 
-  // Load form values from localStorage only if config is not available
-  useEffect(() => {
-    // Only load from localStorage if config hasn't loaded yet or failed
-    // config.json has priority over localStorage
-    if (!configData && !configLoading) {
-      const savedFormData = localStorage.getItem('backtestFormData');
-      if (savedFormData) {
-        try {
-          const parsedData = JSON.parse(savedFormData);
-          form.reset(parsedData);
-        } catch (error) {
-          console.warn('Failed to parse saved form data:', error);
-        }
-      }
-    }
-  }, [form, configData, configLoading]);
-
   // Save form values to localStorage whenever they change
   useEffect(() => {
     const subscription = form.watch((data) => {
@@ -253,7 +266,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
 
   // Reset form when config data loads
   useEffect(() => {
-    if (configData && !configLoading) {
+    if (!savedFormData && configData && !configLoading) {
       suppressStrategyNotifyRef.current = true;
       form.reset(defaultValues);
       const s = typeof selectedStrategyName === "string" ? String(selectedStrategyName) : "";
@@ -264,11 +277,26 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
         suppressStrategyNotifyRef.current = false;
       }, 0);
     }
-  }, [configData, configLoading, defaultValues, form, selectedStrategyName]);
+  }, [savedFormData, configData, configLoading, defaultValues, form, selectedStrategyName]);
 
   const selectedPairs = form.watch("config.pairs");
   const downloadDateFrom = form.watch("config.backtest_date_from");
   const downloadDateTo = form.watch("config.backtest_date_to");
+
+  useEffect(() => {
+    const pairsCount = Array.isArray(selectedPairs) ? selectedPairs.length : 0;
+    const nextAuto = Math.max(0, pairsCount);
+    const current = Number(form.getValues("config.max_open_trades"));
+    const prevAuto = maxOpenTradesAutoRef.current;
+
+    const shouldAuto = !maxOpenTradesManualRef.current || (prevAuto != null && current === prevAuto);
+    maxOpenTradesAutoRef.current = nextAuto;
+
+    if (shouldAuto && Number.isFinite(current) && current !== nextAuto) {
+      form.setValue("config.max_open_trades", nextAuto, { shouldDirty: false, shouldTouch: false });
+      maxOpenTradesManualRef.current = false;
+    }
+  }, [form, selectedPairs]);
 
   const togglePair = (pair: string) => {
     const current = [...selectedPairs];
@@ -299,30 +327,11 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
     {
       key: 's',
       altKey: true,
-      description: 'Save config',
+      description: 'Save preferences',
       action: () => {
         const data = form.getValues();
-        updateConfig.mutate({
-          strategy: data.strategyName.split('/').pop()?.replace('.py', ''),
-          timeframe: data.config.timeframe,
-          stake_amount: data.config.stake_amount,
-          max_open_trades: data.config.max_open_trades,
-          tradable_balance_ratio: data.config.tradable_balance_ratio,
-          trailing_stop: data.config.trailing_stop,
-          trailing_stop_positive: data.config.trailing_stop_positive,
-          trailing_stop_positive_offset: data.config.trailing_stop_positive_offset,
-          trailing_only_offset_is_reached: data.config.trailing_only_offset_is_reached,
-          minimal_roi: data.config.minimal_roi,
-          stoploss: data.config.stoploss,
-          pairs: data.config.pairs,
-        }, {
-          onSuccess: () => {
-            onLog(`✓ Config saved to config.json`);
-          },
-          onError: (error: any) => {
-            onLog(`✗ Failed to save config: ${error.message}`);
-          }
-        });
+        localStorage.setItem('backtestFormData', JSON.stringify(data));
+        onLog(`✓ Preferences saved`);
       }
     },
     {
@@ -478,12 +487,19 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
       : "";
     const timerange = (fromPart || toPart) ? `${fromPart}-${toPart}` : "";
 
+    const includeStoploss = Boolean(data?.config?.include_stoploss);
+    const config = {
+      ...data?.config,
+      timerange,
+    };
+    delete (config as any).include_stoploss;
+    if (!includeStoploss) {
+      delete (config as any).stoploss;
+    }
+
     const payload = {
       ...data,
-      config: {
-        ...data?.config,
-        timerange,
-      },
+      config,
     };
 
     onLog(`Starting backtest for strategy: ${data.strategyName}...`);
@@ -1000,7 +1016,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                       </Badge>
                     ))}
                   </div>
-                  <FormMessage>{form.formState.errors.config?.pairs?.message}</FormMessage>
+                  <FormMessage>{(form.formState.errors as any)?.config?.pairs?.message ? String((form.formState.errors as any).config.pairs.message) : null}</FormMessage>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
@@ -1049,6 +1065,31 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
 
                 <FormField
                   control={form.control}
+                  name="config.include_stoploss"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormControl>
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            checked={Boolean(field.value)}
+                            onCheckedChange={(v) => {
+                              const enabled = Boolean(v);
+                              field.onChange(enabled);
+                              if (!enabled) {
+                                form.setValue("config.stoploss" as any, undefined, { shouldDirty: true, shouldTouch: true });
+                              }
+                            }}
+                          />
+                          <div className="text-xs text-muted-foreground">Include stoploss override</div>
+                        </div>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
                   name="config.stoploss"
                   render={({ field }) => (
                     <FormItem>
@@ -1056,8 +1097,17 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                       <FormControl>
                         <Input
                           type="number"
-                          value={field.value}
-                          onChange={(e) => field.onChange(parseFloat(e.target.value) || 0)}
+                          disabled={!Boolean(form.getValues("config.include_stoploss" as any))}
+                          value={field.value ?? ""}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (!raw) {
+                              field.onChange(undefined);
+                              return;
+                            }
+                            const n = Number(raw);
+                            field.onChange(Number.isFinite(n) ? n : undefined);
+                          }}
                           placeholder="-0.1"
                           step="0.001"
                         />
@@ -1174,7 +1224,10 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                           <Input
                             type="number"
                             value={field.value}
-                            onChange={(e) => field.onChange(parseInt(e.target.value, 10) || 0)}
+                            onChange={(e) => {
+                              maxOpenTradesManualRef.current = true;
+                              field.onChange(parseInt(e.target.value, 10) || 0);
+                            }}
                             placeholder="1"
                             min="0"
                             step="1"
@@ -1321,45 +1374,18 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                     type="button"
                     variant="outline"
                     className="flex-1 h-9 text-xs gap-1.5"
-                    disabled={updateConfig.isPending}
                     onClick={() => {
                       const data = form.getValues();
-                      updateConfig.mutate({
-                        strategy: data.strategyName.split('/').pop()?.replace('.py', ''),
-                        timeframe: data.config.timeframe,
-                        stake_amount: data.config.stake_amount,
-                        max_open_trades: data.config.max_open_trades,
-                        tradable_balance_ratio: data.config.tradable_balance_ratio,
-                        trailing_stop: data.config.trailing_stop,
-                        trailing_stop_positive: data.config.trailing_stop_positive,
-                        trailing_stop_positive_offset: data.config.trailing_stop_positive_offset,
-                        trailing_only_offset_is_reached: data.config.trailing_only_offset_is_reached,
-                        minimal_roi: data.config.minimal_roi,
-                        stoploss: data.config.stoploss,
-                        pairs: data.config.pairs,
-                      }, {
-                        onSuccess: () => {
-                          onLog(`✓ Config saved to config.json`);
-                        },
-                        onError: (error: any) => {
-                          onLog(`✗ Failed to save config: ${error.message}`);
-                        }
-                      });
+                      localStorage.setItem('backtestFormData', JSON.stringify(data));
+                      onLog(`✓ Preferences saved`);
                     }}
                     title="Alt+S"
                   >
-                    {updateConfig.isPending ? (
-                      <>
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Saving...
-                      </>
-                    ) : (
-                      <>
-                        <SaveIcon className="w-3 h-3" />
-                        Save Config
-                        <kbd className="ml-auto text-[9px] font-mono opacity-60">Alt+S</kbd>
-                      </>
-                    )}
+                    <>
+                      <SaveIcon className="w-3 h-3" />
+                      Save Preferences
+                      <kbd className="ml-auto text-[9px] font-mono opacity-60">Alt+S</kbd>
+                    </>
                   </Button>
                   <Button 
                     type="submit" 

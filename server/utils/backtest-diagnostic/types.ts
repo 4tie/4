@@ -2,8 +2,13 @@ export interface DataContinuityCheck {
   hasMissingBars: boolean;
   gapCount: number;
   largestGapMinutes: number;
+  ohlcvVerified?: boolean;
+  ohlcvGapCount?: number;
+  ohlcvLargestGapMinutes?: number;
+  missingDataFiles?: Array<{ pair: string; timeframe: string; path: string }>;
+  unverifiedDataFiles?: Array<{ pair: string; timeframe: string; path: string }>;
   timestampSequenceValid: boolean;
-  verdict: 'PASS' | 'FAIL';
+  verdict: 'PASS' | 'WARN' | 'FAIL';
   details: string;
 }
 
@@ -24,7 +29,7 @@ export interface LogicFeasibilityCheck {
 }
 
 export interface StructuralIntegrityReport {
-  verdict: 'PASS' | 'FAIL';
+  verdict: 'PASS' | 'WARN' | 'FAIL';
   dataContinuity: DataContinuityCheck;
   lookAheadBias: LookAheadBiasCheck;
   logicFeasibility: LogicFeasibilityCheck;

@@ -8,7 +8,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { useAIStore } from "@/hooks/use-ai";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { api } from "@shared/routes";
+import { api, buildUrl } from "@shared/routes";
 
 interface ChatContext {
   fileName?: string;
@@ -37,6 +37,29 @@ interface Message {
   content: string;
   timestamp: Date;
 }
+
+type RefinementStage = "idle" | "starting" | "running" | "completed" | "failed";
+type RefinementRunType = "single" | "batch";
+
+type BacktestSummary = {
+  id: number;
+  profitTotal: number | null;
+  winRate: number | null;
+  maxDrawdown: number | null;
+  totalTrades: number | null;
+};
+
+type RefinementState = {
+  type: RefinementRunType;
+  stage: RefinementStage;
+  startedAt: number;
+  updatedAt: number;
+  strategyName: string;
+  ids: number[];
+  completedIds: number[];
+  lastLogLine: string | null;
+  summaries: BacktestSummary[];
+};
 
 function createMessageId() {
   try {
@@ -328,6 +351,16 @@ const shouldWarnFunctionMismatch = (
 export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfig, onApplyAndSaveCode }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [autoExplain, setAutoExplain] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem("chat:autoExplainRefinement");
+      if (raw == null) return true;
+      return raw === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [refinement, setRefinement] = useState<RefinementState | null>(null);
   const [preview, setPreview] = useState<null | {
     title: string;
     mode: "selection" | "cursor" | "enclosingFunction";
@@ -339,6 +372,10 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
   const { selectedModel } = useAIStore();
   const queryClient = useQueryClient();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const refinementPollerRef = useRef<number | null>(null);
+  const refinementPollInFlightRef = useRef(false);
+  const refinementRef = useRef<RefinementState | null>(null);
+  const announcedCompletedRef = useRef<Set<number>>(new Set());
   const hasSelection = Boolean(context.selectedCode && String(context.selectedCode).trim().length > 0);
   const enclosingFunctionBlock = useMemo(() => {
     return inferEnclosingPythonFunctionBlockFromFile(context.fileContent, context.lineNumber);
@@ -353,6 +390,408 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     Boolean(context.fileName) &&
     String(context.fileName).startsWith("user_data/strategies/") &&
     String(context.fileName).endsWith(".py");
+
+  const pushMessage = (role: Message["role"], content: string) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: createMessageId(),
+        role,
+        content,
+        timestamp: new Date(),
+      },
+    ]);
+  };
+
+  const toNum = (value: unknown): number => {
+    const n = typeof value === "number" ? value : typeof value === "string" ? parseFloat(value) : NaN;
+    return Number.isFinite(n) ? n : NaN;
+  };
+
+  const normalizeRatio = (value: unknown): number | null => {
+    const n = toNum(value);
+    if (!Number.isFinite(n)) return null;
+    if (Math.abs(n) > 1.5) return n / 100;
+    return n;
+  };
+
+  const formatDuration = (ms: number): string => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const mm = Math.floor(s / 60);
+    const ss = s % 60;
+    return `${mm}m ${ss}s`;
+  };
+
+  const estimateRemainingMs = (r: RefinementState | null): number | null => {
+    if (!r) return null;
+    if (!r.ids.length) return null;
+    const completed = r.completedIds.length;
+    const remaining = r.ids.length - completed;
+    if (remaining <= 0) return 0;
+    if (completed <= 0) return null;
+    const elapsed = Date.now() - r.startedAt;
+    const avgPerRun = elapsed / completed;
+    if (!Number.isFinite(avgPerRun) || avgPerRun <= 0) return null;
+    const est = Math.max(0, Math.round(avgPerRun * remaining));
+    return Number.isFinite(est) ? est : null;
+  };
+
+  const buildBacktestSummary = (backtest: any): BacktestSummary | null => {
+    const id = Number(backtest?.id);
+    if (!Number.isFinite(id)) return null;
+    const r = backtest?.results;
+    return {
+      id,
+      profitTotal: normalizeRatio(r?.profit_total),
+      winRate: normalizeRatio(r?.win_rate),
+      maxDrawdown: normalizeRatio(r?.max_drawdown),
+      totalTrades: Number.isFinite(toNum(r?.total_trades)) ? toNum(r?.total_trades) : null,
+    };
+  };
+
+  const explainNextFocus = (summary: BacktestSummary): string => {
+    const trades = summary.totalTrades ?? 0;
+    const p = summary.profitTotal;
+    const wr = summary.winRate;
+    const dd = summary.maxDrawdown;
+
+    if (trades > 0 && trades < 30) {
+      return "Focus next: increase sample size (longer timerange / more pairs) before making aggressive logic changes.";
+    }
+    if (p != null && p < 0) {
+      if (wr != null && wr > 0.55) {
+        return "Focus next: expectancy (winners too small vs losers). Tighten stoploss or improve exits to cut large losers.";
+      }
+      return "Focus next: improve edge (entries / filters) and reduce drawdown. Add regime filters or reduce noise trades.";
+    }
+    if (dd != null && dd >= 0.2) {
+      return "Focus next: risk management. Drawdown is high; consider tighter stoploss, fewer open trades, or a trend filter.";
+    }
+    if (p != null && p > 0 && wr != null && wr < 0.35) {
+      return "Focus next: stability. Profit relies on a few big winners; consider reducing losing streaks with better filters.";
+    }
+    return "Focus next: validate robustness (different timeranges) and then tune parameters carefully (small steps).";
+  };
+
+  const fetchBacktest = async (id: number): Promise<any> => {
+    const url = buildUrl(api.backtests.get.path, { id });
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) throw new Error("Failed to fetch backtest status");
+    return res.json();
+  };
+
+  const stopRefinementPolling = () => {
+    if (refinementPollerRef.current != null) {
+      window.clearInterval(refinementPollerRef.current);
+      refinementPollerRef.current = null;
+    }
+    refinementPollInFlightRef.current = false;
+  };
+
+  const startRefinementPolling = (strategyName: string, ids: number[], type: RefinementRunType) => {
+    stopRefinementPolling();
+    const initial: RefinementState = {
+      type,
+      stage: "running",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      strategyName,
+      ids,
+      completedIds: [],
+      lastLogLine: null,
+      summaries: [],
+    };
+    announcedCompletedRef.current = new Set();
+    refinementRef.current = initial;
+    setRefinement(initial);
+
+    const pollOnce = async () => {
+      if (refinementPollInFlightRef.current) return;
+      refinementPollInFlightRef.current = true;
+      try {
+        const current = refinementRef.current;
+        const base = current?.ids?.length ? current : { ids, completedIds: [], summaries: [], lastLogLine: null };
+        const doneSet = new Set<number>(base.completedIds || []);
+        const pending = (base.ids || ids).filter((x: number) => !doneSet.has(x));
+        if (pending.length === 0) {
+          refinementPollInFlightRef.current = false;
+          return;
+        }
+
+        const updates = await Promise.all(
+          pending.map(async (bid: number) => {
+            try {
+              return await fetchBacktest(bid);
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        const completedNow: number[] = [];
+        const summariesNow: BacktestSummary[] = [];
+        const failedNow: number[] = [];
+        let lastLogLine: string | null = base.lastLogLine || null;
+
+        for (const bt of updates) {
+          if (!bt) continue;
+          const logs = Array.isArray(bt?.logs) ? (bt.logs as unknown[]) : [];
+          const candidate = logs.length ? String(logs[logs.length - 1] ?? "").trim() : "";
+          if (candidate) {
+            lastLogLine = candidate.length > 220 ? candidate.slice(-220) : candidate;
+          }
+
+          const bid = Number(bt?.id);
+          const status = String(bt?.status || "");
+          const hasResults = Boolean(bt?.results);
+          if (Number.isFinite(bid) && status === "failed") {
+            completedNow.push(bid);
+            failedNow.push(bid);
+          }
+          if (Number.isFinite(bid) && status === "completed" && hasResults) {
+            completedNow.push(bid);
+            const s = buildBacktestSummary(bt);
+            if (s) summariesNow.push(s);
+          }
+        }
+
+        if (failedNow.length) {
+          for (const id of failedNow) {
+            if (announcedCompletedRef.current.has(id)) continue;
+            announcedCompletedRef.current.add(id);
+            pushMessage("assistant", `Backtest ${id} failed. Check the log output above and the Backtests panel for details.`);
+          }
+        }
+
+        if (completedNow.length) {
+          setRefinement((prev) => {
+            if (!prev) return prev;
+            const prevDone = new Set(prev.completedIds);
+            const nextDone = [...prev.completedIds];
+            for (const id of completedNow) {
+              if (!prevDone.has(id)) nextDone.push(id);
+            }
+            const prevSumm = new Map(prev.summaries.map((s) => [s.id, s] as const));
+            for (const s of summariesNow) {
+              prevSumm.set(s.id, s);
+            }
+            const next: RefinementState = {
+              ...prev,
+              updatedAt: Date.now(),
+              completedIds: nextDone,
+              lastLogLine,
+              summaries: Array.from(prevSumm.values()),
+            };
+            refinementRef.current = next;
+            return next;
+          });
+
+          for (const s of summariesNow) {
+            if (announcedCompletedRef.current.has(s.id)) continue;
+            announcedCompletedRef.current.add(s.id);
+            const pPct = s.profitTotal == null ? "N/A" : `${(s.profitTotal * 100).toFixed(2)}%`;
+            const wrPct = s.winRate == null ? "N/A" : `${(s.winRate * 100).toFixed(1)}%`;
+            const ddPct = s.maxDrawdown == null ? "N/A" : `${(s.maxDrawdown * 100).toFixed(2)}%`;
+            const tr = s.totalTrades == null ? "N/A" : String(s.totalTrades);
+            pushMessage(
+              "assistant",
+              [
+                `Backtest ${s.id} finished.`,
+                `- Profit: ${pPct}`,
+                `- Win Rate: ${wrPct}`,
+                `- Max Drawdown: ${ddPct}`,
+                `- Trades: ${tr}`,
+                explainNextFocus(s),
+              ].join("\n"),
+            );
+          }
+        }
+
+        let finalized = false;
+        setRefinement((prev) => {
+          if (!prev) return prev;
+          const nextStage = failedNow.length ? "failed" : prev.stage;
+          const allDone = prev.ids.length > 0 && prev.completedIds.length >= prev.ids.length;
+          if (!allDone) {
+            const next: RefinementState = { ...prev, stage: nextStage as RefinementStage, updatedAt: Date.now(), lastLogLine };
+            refinementRef.current = next;
+            return next;
+          }
+          finalized = true;
+          const next: RefinementState = { ...prev, stage: nextStage === "failed" ? "failed" : "completed", updatedAt: Date.now(), lastLogLine };
+          refinementRef.current = next;
+          return next;
+        });
+
+        if (finalized) {
+          stopRefinementPolling();
+
+          const final = refinementRef.current;
+          if (final && autoExplain && selectedModel) {
+            if (final.type === "single" && final.summaries.length === 1) {
+              const s = final.summaries[0];
+              const pPct = s.profitTotal == null ? "N/A" : `${(s.profitTotal * 100).toFixed(2)}%`;
+              const wrPct = s.winRate == null ? "N/A" : `${(s.winRate * 100).toFixed(1)}%`;
+              const ddPct = s.maxDrawdown == null ? "N/A" : `${(s.maxDrawdown * 100).toFixed(2)}%`;
+              const tr = s.totalTrades == null ? "N/A" : String(s.totalTrades);
+              const prompt = [
+                `We just finished a refinement backtest (ID ${s.id}) for strategy '${strategyName}'.`,
+                `Metrics: profit=${pPct}, win_rate=${wrPct}, max_drawdown=${ddPct}, trades=${tr}.`,
+                "Explain what these results mean, what is likely wrong/right in the strategy logic, and propose the next refinement step.",
+              ].join("\n");
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: createMessageId(),
+                  role: "user",
+                  content: prompt,
+                  timestamp: new Date(),
+                },
+              ]);
+              chatMutation.mutate(prompt);
+            }
+
+            if (final.type === "batch" && final.summaries.length) {
+              const lines = final.summaries
+                .slice()
+                .sort((a, b) => a.id - b.id)
+                .map((s) => {
+                  const pPct = s.profitTotal == null ? "N/A" : `${(s.profitTotal * 100).toFixed(2)}%`;
+                  const wrPct = s.winRate == null ? "N/A" : `${(s.winRate * 100).toFixed(1)}%`;
+                  const ddPct = s.maxDrawdown == null ? "N/A" : `${(s.maxDrawdown * 100).toFixed(2)}%`;
+                  const tr = s.totalTrades == null ? "N/A" : String(s.totalTrades);
+                  return `- ${s.id}: profit=${pPct}, win_rate=${wrPct}, drawdown=${ddPct}, trades=${tr}`;
+                });
+              const prompt = [
+                `We just finished a refinement batch for strategy '${strategyName}'.`,
+                "Summaries:",
+                ...lines,
+                "Compare the runs, describe stability/robustness, and propose the next refinement step.",
+              ].join("\n");
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: createMessageId(),
+                  role: "user",
+                  content: prompt,
+                  timestamp: new Date(),
+                },
+              ]);
+              chatMutation.mutate(prompt);
+            }
+          }
+        }
+      } finally {
+        refinementPollInFlightRef.current = false;
+      }
+    };
+
+    refinementPollerRef.current = window.setInterval(() => {
+      pollOnce().catch(() => {});
+    }, 1500);
+
+    pollOnce().catch(() => {});
+  };
+
+  const summarizeConfig = (cfg: any): string => {
+    if (!cfg || typeof cfg !== "object") return "";
+    const tf = cfg.timeframe ? String(cfg.timeframe) : "";
+    const pairs = Array.isArray(cfg.pairs) ? cfg.pairs : null;
+    const from = cfg.backtest_date_from ? String(cfg.backtest_date_from) : "";
+    const to = cfg.backtest_date_to ? String(cfg.backtest_date_to) : "";
+    const timerange = cfg.timerange ? String(cfg.timerange) : "";
+    const parts: string[] = [];
+    if (tf) parts.push(`timeframe=${tf}`);
+    if (timerange) parts.push(`timerange=${timerange}`);
+    if (from || to) parts.push(`range=${from || "?"} → ${to || "?"}`);
+    if (pairs && pairs.length) parts.push(`pairs=${pairs.length}`);
+    return parts.length ? parts.join(", ") : "";
+  };
+
+  const runBacktestNarrated = async (payload: any) => {
+    const strategyName = String(payload?.strategyName || "");
+    const cfgText = summarizeConfig(payload?.config);
+    pushMessage(
+      "assistant",
+      [
+        `Refinement: starting a backtest for '${strategyName}'.`,
+        cfgText ? `Config: ${cfgText}` : "",
+        "Status: preparing run. Estimated time: typically 2–6 minutes depending on timerange/pairs.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+    setRefinement({
+      type: "single",
+      stage: "starting",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      strategyName,
+      ids: [],
+      completedIds: [],
+      lastLogLine: null,
+      summaries: [],
+    });
+    try {
+      const data = await runBacktestMutation.mutateAsync(payload);
+      const id = Number(data?.id);
+      if (!Number.isFinite(id)) {
+        pushMessage("assistant", "Backtest started, but no backtest ID was returned.");
+        setRefinement(null);
+        return;
+      }
+      pushMessage("assistant", `Backtest started (ID ${id}). Status: running…`);
+      startRefinementPolling(strategyName, [id], "single");
+    } catch (e: any) {
+      pushMessage("assistant", `Error running backtest: ${e?.message || "Failed to run backtest"}`);
+      setRefinement((prev) => (prev ? { ...prev, stage: "failed", updatedAt: Date.now() } : prev));
+      stopRefinementPolling();
+    }
+  };
+
+  const runBatchNarrated = async (payload: any) => {
+    const strategyName = String(payload?.strategyName || "");
+    const cfgText = summarizeConfig(payload?.baseConfig);
+    const countGuess = Array.isArray(payload?.ranges)
+      ? payload.ranges.length
+      : (payload?.rolling?.count ?? 4);
+    pushMessage(
+      "assistant",
+      [
+        `Refinement: starting a batch backtest for '${strategyName}' (${countGuess} runs).`,
+        cfgText ? `Base config: ${cfgText}` : "",
+        "Status: preparing batch. Estimated time: roughly 2–6 minutes per run.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+    setRefinement({
+      type: "batch",
+      stage: "starting",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      strategyName,
+      ids: [],
+      completedIds: [],
+      lastLogLine: null,
+      summaries: [],
+    });
+    try {
+      const data = await runBatchMutation.mutateAsync(payload);
+      const ids = Array.isArray(data?.backtests) ? data.backtests.map((b: any) => Number(b?.id)).filter((x: any) => Number.isFinite(x)) : [];
+      if (!ids.length) {
+        pushMessage("assistant", "Batch started, but no backtest IDs were returned.");
+        setRefinement(null);
+        return;
+      }
+      pushMessage("assistant", `Batch started (${data?.batchId ?? "?"}). Tracking ${ids.length} runs: ${ids.join(", ")}`);
+      startRefinementPolling(strategyName, ids, "batch");
+    } catch (e: any) {
+      pushMessage("assistant", `Error running batch: ${e?.message || "Failed to run batch"}`);
+      setRefinement((prev) => (prev ? { ...prev, stage: "failed", updatedAt: Date.now() } : prev));
+      stopRefinementPolling();
+    }
+  };
 
   const chatMutation = useMutation({
     mutationFn: async (message: string) => {
@@ -407,15 +846,6 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] }).catch(() => {});
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: createMessageId(),
-          role: "assistant",
-          content: `Started backtest with ID: ${data?.id ?? "?"}`,
-          timestamp: new Date(),
-        },
-      ]);
     },
     onError: (error: any) => {
       setMessages((prev) => [
@@ -437,16 +867,6 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] }).catch(() => {});
-      const ids = Array.isArray(data?.backtests) ? data.backtests.map((b: any) => b?.id).filter(Boolean) : [];
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: createMessageId(),
-          role: "assistant",
-          content: `Started batch '${data?.batchId ?? "?"}' with ${ids.length} backtests. IDs: ${ids.join(", ")}`,
-          timestamp: new Date(),
-        },
-      ]);
     },
     onError: (error: any) => {
       setMessages((prev) => [
@@ -468,6 +888,23 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     window.addEventListener('attach-backtest-results', handleAttach);
     return () => window.removeEventListener('attach-backtest-results', handleAttach);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      stopRefinementPolling();
+    };
+  }, []);
+
+  useEffect(() => {
+    refinementRef.current = refinement;
+  }, [refinement]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("chat:autoExplainRefinement", String(autoExplain));
+    } catch {
+    }
+  }, [autoExplain]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -554,6 +991,16 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
 
             <Button
               variant="ghost"
+              size="sm"
+              className="h-5 px-2 text-[10px] hover:bg-primary/20 hover:text-primary shrink-0 ml-1"
+              title="When enabled, the chat will automatically ask the AI to interpret completed backtests."
+              onClick={() => setAutoExplain((v) => !v)}
+            >
+              Auto Explain: {autoExplain ? "On" : "Off"}
+            </Button>
+
+            <Button
+              variant="ghost"
               size="icon"
               className="h-5 w-5 hover:bg-primary/20 hover:text-primary shrink-0 ml-1"
               title="Ask AI to add a TA indicator pack (RSI/EMA/MACD/BB/ATR/ADX/Volume)"
@@ -580,6 +1027,40 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
               <div className="flex items-center gap-1.5 text-[10px] text-primary bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10">
                 <Code className="w-2.5 h-2.5" />
                 <span>Selected: {context.selectedCode.split('\n').length} lines</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {refinement && refinement.stage !== "idle" && (
+        <div className="px-3 py-2 border-b border-border/30 bg-background">
+          <div className="rounded-md border border-border/40 bg-muted/30 px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-medium">
+                {(refinement.stage === "running" || refinement.stage === "starting") ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : null}
+                <span>
+                  Refinement Status: {refinement.stage}
+                  {refinement.type === "batch" ? ` (${refinement.completedIds.length}/${refinement.ids.length})` : ""}
+                </span>
+              </div>
+              <div className="text-[10px] text-muted-foreground">
+                {(() => {
+                  const elapsed = Date.now() - refinement.startedAt;
+                  const remaining = estimateRemainingMs(refinement);
+                  const remainingText =
+                    remaining == null
+                      ? ""
+                      : (remaining === 0 ? " · Remaining: 0m 0s" : ` · Remaining: ~${formatDuration(remaining)}`);
+                  return `Elapsed: ${formatDuration(elapsed)}${remainingText}`;
+                })()}
+              </div>
+            </div>
+            {refinement.lastLogLine && (
+              <div className="mt-1 text-[10px] text-muted-foreground whitespace-pre-wrap break-words">
+                {refinement.lastLogLine}
               </div>
             )}
           </div>
@@ -698,7 +1179,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
 
                                   const ok = confirm("Run this backtest now?");
                                   if (!ok) return;
-                                  runBacktestMutation.mutate(payload);
+                                  runBacktestNarrated(payload);
                                   return;
                                 }
 
@@ -722,7 +1203,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                     : (payload.rolling?.count ?? 4);
                                   const ok = confirm(`Run batch backtest now? (about ${countGuess} runs)`);
                                   if (!ok) return;
-                                  runBatchMutation.mutate(payload);
+                                  runBatchNarrated(payload);
                                   return;
                                 }
 
