@@ -9,15 +9,17 @@ import { BacktestDashboard } from "@/components/BacktestDashboard";
 import { ChatPanel, ChatToggleButton } from "@/components/ChatPanel";
 import { BacktestResults } from "@/components/BacktestResults";
 import { StrategyParamsDialog } from "@/components/StrategyParamsDialog";
+import { DiagnosticsPage } from "@/pages/Diagnostics";
 import { useFile, useUpdateFile } from "@/hooks/use-files";
 import { useBacktest, useBacktests } from "@/hooks/use-backtests";
 import { useUpdateConfig } from "@/hooks/use-config";
+import { usePreferences } from "@/hooks/use-preferences";
 import { Button } from "@/components/ui/button";
 import { Save, Play, Loader2, MessageSquare, Layout, Activity, BarChart3, Cpu, Zap, Wifi, WifiOff, FileCode, Scale, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 
-type ViewMode = "ide" | "backtest" | "results" | "comparison";
+type ViewMode = "ide" | "backtest" | "results" | "comparison" | "diagnostics";
 
 export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("ide");
@@ -32,6 +34,10 @@ export default function Home() {
   const [editorState, setEditorState] = useState<EditorState>({ selectedCode: "", lineNumber: 1 });
   const editorRef = useRef<CodeEditorHandle>(null);
   const [paramsOpen, setParamsOpen] = useState(false);
+  const [diagnosticsPlacement, setDiagnosticsPlacement] = usePreferences<"header" | "sidebar">(
+    "diagnosticsPlacement",
+    "header",
+  );
   
   const { data: backtests } = useBacktests();
   const backtestById = (id: number | null) => {
@@ -255,6 +261,23 @@ export default function Home() {
               <Scale className="w-3.5 h-3.5" />
               Compare
             </Button>
+            {diagnosticsPlacement === "header" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  "h-8 px-3 text-xs gap-2 transition-all duration-200",
+                  viewMode === "diagnostics" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                )}
+                onClick={() => {
+                  setViewMode("diagnostics");
+                  setShowBacktestDashboard(false);
+                }}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                Diagnostics
+              </Button>
+            )}
           </nav>
         </div>
         
@@ -330,6 +353,12 @@ export default function Home() {
                 onFileSelect={handleFileSelect}
                 onBacktestSelect={handleBacktestSelect}
                 selectedStrategyName={selectedStrategyName}
+                showDiagnosticsIcon={diagnosticsPlacement === "sidebar"}
+                diagnosticsActive={viewMode === "diagnostics"}
+                onDiagnosticsSelect={() => {
+                  setViewMode("diagnostics");
+                  setShowBacktestDashboard(false);
+                }}
                 onViewBacktest={(backtestId) => {
                   const bt = backtestById(backtestId);
                   if (bt?.strategyName) {
@@ -508,6 +537,13 @@ export default function Home() {
                   </div>
                 ) : viewMode === "comparison" ? (
                   <StrategyComparison />
+                ) : viewMode === "diagnostics" ? (
+                  <DiagnosticsPage
+                    selectedStrategyName={selectedStrategyName}
+                    placement={diagnosticsPlacement}
+                    onPlacementChange={setDiagnosticsPlacement}
+                    onOpenChat={() => setChatOpen(true)}
+                  />
                 ) : (
                   <div className="h-full flex flex-col">
                     <div className="h-10 border-b border-border bg-background flex items-center px-4">

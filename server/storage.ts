@@ -6,13 +6,17 @@ import {
   aiChatSessions,
   aiChatMessages,
   aiAuditEvents,
+  aiActions,
+  agentHandoffs,
   type File, type InsertFile,
   type Backtest, type InsertBacktest,
   type DiagnosticReport, type InsertDiagnosticReport,
   type DiagnosticJob, type InsertDiagnosticJob,
   type AiChatSession,
   type AiChatMessage, type InsertAiChatMessage,
-  type AiAuditEvent, type InsertAiAuditEvent
+  type AiAuditEvent, type InsertAiAuditEvent,
+  type AiAction, type InsertAiAction,
+  type AgentHandoff, type InsertAgentHandoff
 } from "@shared/schema";
 import fs from "fs/promises";
 import fsSync from "fs";
@@ -39,6 +43,7 @@ export interface IStorage {
   // Diagnostics
   createDiagnosticReport(report: InsertDiagnosticReport): Promise<DiagnosticReport>;
   getDiagnosticReport(id: number): Promise<DiagnosticReport | undefined>;
+  getDiagnosticReportByReportId(reportId: string): Promise<DiagnosticReport | undefined>;
   getDiagnosticReports(backtestId?: number): Promise<DiagnosticReport[]>;
 
   // Diagnostic Jobs
@@ -54,6 +59,14 @@ export interface IStorage {
   createAiChatMessage(message: InsertAiChatMessage): Promise<AiChatMessage>;
   getAiChatMessages(sessionId: number, since?: Date | null): Promise<AiChatMessage[]>;
   createAiAuditEvent(event: InsertAiAuditEvent): Promise<AiAuditEvent>;
+  // AI Actions
+  createAiAction(action: InsertAiAction): Promise<AiAction>;
+  getAiActions(sessionId?: number, backtestId?: number): Promise<AiAction[]>;
+  getAiAction(id: number): Promise<AiAction | undefined>;
+  getAiActionsForBacktest(backtestId: number): Promise<AiAction[]>;
+  // Agent Handoffs
+  createAgentHandoff(handoff: InsertAgentHandoff): Promise<AgentHandoff>;
+  getAgentHandoffByRunId(runId: string): Promise<AgentHandoff | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -267,6 +280,11 @@ export class DatabaseStorage implements IStorage {
     return report;
   }
 
+  async getDiagnosticReportByReportId(reportId: string): Promise<DiagnosticReport | undefined> {
+    const [report] = await db.select().from(diagnosticReports).where(eq(diagnosticReports.reportId, reportId));
+    return report;
+  }
+
   async getDiagnosticReports(backtestId?: number): Promise<DiagnosticReport[]> {
     if (backtestId) {
       return await db.select().from(diagnosticReports).where(eq(diagnosticReports.backtestId, backtestId)).orderBy(desc(diagnosticReports.createdAt));
@@ -365,6 +383,47 @@ export class DatabaseStorage implements IStorage {
   async createAiAuditEvent(event: InsertAiAuditEvent): Promise<AiAuditEvent> {
     const [inserted] = await db.insert(aiAuditEvents).values(event).returning();
     return inserted;
+  }
+
+  async createAiAction(action: InsertAiAction): Promise<AiAction> {
+    const [inserted] = await db.insert(aiActions).values(action).returning();
+    return inserted;
+  }
+
+  async getAiActions(sessionId?: number, backtestId?: number): Promise<AiAction[]> {
+    if (sessionId && backtestId) {
+      return await db
+        .select()
+        .from(aiActions)
+        .where(and(eq(aiActions.sessionId, sessionId), eq(aiActions.backtestId, backtestId)))
+        .orderBy(desc(aiActions.createdAt));
+    }
+    if (sessionId) {
+      return await db.select().from(aiActions).where(eq(aiActions.sessionId, sessionId)).orderBy(desc(aiActions.createdAt));
+    }
+    if (backtestId) {
+      return await db.select().from(aiActions).where(eq(aiActions.backtestId, backtestId)).orderBy(desc(aiActions.createdAt));
+    }
+    return await db.select().from(aiActions).orderBy(desc(aiActions.createdAt));
+  }
+
+  async getAiAction(id: number): Promise<AiAction | undefined> {
+    const [action] = await db.select().from(aiActions).where(eq(aiActions.id, id));
+    return action;
+  }
+
+  async getAiActionsForBacktest(backtestId: number): Promise<AiAction[]> {
+    return await db.select().from(aiActions).where(eq(aiActions.backtestId, backtestId)).orderBy(desc(aiActions.createdAt));
+  }
+
+  async createAgentHandoff(handoff: InsertAgentHandoff): Promise<AgentHandoff> {
+    const [inserted] = await db.insert(agentHandoffs).values(handoff).returning();
+    return inserted;
+  }
+
+  async getAgentHandoffByRunId(runId: string): Promise<AgentHandoff | undefined> {
+    const [handoff] = await db.select().from(agentHandoffs).where(eq(agentHandoffs.runId, runId));
+    return handoff;
   }
 }
 

@@ -114,9 +114,18 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
       queryClient.invalidateQueries({ queryKey: [`/api/diagnostic/reports/${backtestId}`] });
       setShowDiagnostic(true);
       toast({
-        title: "Diagnostic Complete",
-        description: "Strategy analysis has been generated.",
+        title: "Diagnostic Queued",
+        description: "The diagnostic job is running. Open Diagnostics for progress.",
       });
+      fetch("/api/ai-actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actionType: "diagnostic_run",
+          description: `Diagnostics queued for backtest ${backtestId}`,
+          backtestId,
+        }),
+      }).catch(() => {});
     },
     onError: (error: any) => {
       toast({
@@ -129,7 +138,8 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
 
   const { data: reports } = useQuery<DiagnosticReport[]>({
     queryKey: [`/api/diagnostic/reports/${backtestId}`],
-    enabled: !!backtestId
+    enabled: !!backtestId,
+    refetchInterval: 3000,
   });
 
   const latestReport = reports?.[0]?.report;
@@ -600,7 +610,7 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
               disabled={diagnosticMutation.isPending}
             >
               <ShieldCheck className="w-4 h-4" />
-              {diagnosticMutation.isPending ? "Analyzing..." : "Analyze Logic"}
+              {diagnosticMutation.isPending ? "Queueing..." : "Analyze Logic"}
             </Button>
             {hasLatestReport && (
               <Button 

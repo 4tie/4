@@ -1,5 +1,14 @@
 import { z } from 'zod';
-import { insertFileSchema, runBacktestRequestSchema, files, backtests } from './schema';
+import {
+  insertFileSchema,
+  runBacktestRequestSchema,
+  files,
+  backtests,
+  aiChatSessions,
+  aiChatMessages,
+  aiActions,
+  agentHandoffs,
+} from './schema';
 
 export const errorSchemas = {
   validation: z.object({
@@ -218,7 +227,163 @@ export const api = {
         500: errorSchemas.internal,
       },
     },
-  }
+  },
+  diagnostics: {
+    analyze: {
+      method: 'POST' as const,
+      path: '/api/diagnostic/analyze',
+      input: z.object({
+        backtestId: z.number(),
+        strategyPath: z.string().optional(),
+      }),
+      responses: {
+        202: z.object({ jobId: z.string(), status: z.string() }),
+        400: errorSchemas.validation,
+        500: errorSchemas.internal,
+      },
+    },
+    job: {
+      method: 'GET' as const,
+      path: '/api/diagnostic/jobs/:jobId',
+      responses: {
+        200: z.any(),
+        404: errorSchemas.notFound,
+      },
+    },
+    jobResult: {
+      method: 'GET' as const,
+      path: '/api/diagnostic/jobs/:jobId/result',
+      responses: {
+        200: z.any(),
+        404: errorSchemas.notFound,
+      },
+    },
+    jobs: {
+      method: 'GET' as const,
+      path: '/api/diagnostic/jobs',
+      responses: {
+        200: z.array(z.any()),
+      },
+    },
+    reports: {
+      method: 'GET' as const,
+      path: '/api/diagnostic/reports',
+      responses: {
+        200: z.array(z.any()),
+      },
+    },
+  },
+  chat: {
+    sessions: {
+      method: 'GET' as const,
+      path: '/api/chat/sessions',
+      responses: {
+        200: z.array(z.custom<typeof aiChatSessions.$inferSelect>()),
+      },
+    },
+    createSession: {
+      method: 'POST' as const,
+      path: '/api/chat/sessions',
+      input: z.object({
+        sessionKey: z.string(),
+        strategyPath: z.string().optional(),
+        backtestId: z.number().optional(),
+      }),
+      responses: {
+        201: z.custom<typeof aiChatSessions.$inferSelect>(),
+        400: errorSchemas.validation,
+      },
+    },
+    messages: {
+      method: 'GET' as const,
+      path: '/api/chat/sessions/:id/messages',
+      responses: {
+        200: z.array(z.custom<typeof aiChatMessages.$inferSelect>()),
+      },
+    },
+    createMessage: {
+      method: 'POST' as const,
+      path: '/api/chat/sessions/:id/messages',
+      input: z.object({
+        role: z.string(),
+        content: z.string(),
+        model: z.string().optional(),
+        request: z.any().optional(),
+        response: z.any().optional(),
+      }),
+      responses: {
+        201: z.custom<typeof aiChatMessages.$inferSelect>(),
+        400: errorSchemas.validation,
+      },
+    },
+  },
+  aiActions: {
+    list: {
+      method: 'GET' as const,
+      path: '/api/ai-actions',
+      responses: {
+        200: z.array(z.custom<typeof aiActions.$inferSelect>()),
+      },
+    },
+    get: {
+      method: 'GET' as const,
+      path: '/api/ai-actions/:id',
+      responses: {
+        200: z.custom<typeof aiActions.$inferSelect>(),
+        404: errorSchemas.notFound,
+      },
+    },
+    create: {
+      method: 'POST' as const,
+      path: '/api/ai-actions',
+      input: z.object({
+        sessionId: z.number().optional(),
+        messageId: z.number().optional(),
+        actionType: z.string(),
+        description: z.string(),
+        beforeState: z.any().optional(),
+        afterState: z.any().optional(),
+        diff: z.any().optional(),
+        backtestId: z.number().optional(),
+        diagnosticReportId: z.number().optional(),
+        results: z.any().optional(),
+      }),
+      responses: {
+        201: z.custom<typeof aiActions.$inferSelect>(),
+        400: errorSchemas.validation,
+      },
+    },
+    byBacktest: {
+      method: 'GET' as const,
+      path: '/api/backtests/:id/ai-actions',
+      responses: {
+        200: z.array(z.custom<typeof aiActions.$inferSelect>()),
+      },
+    },
+  },
+  agentHandoff: {
+    create: {
+      method: 'POST' as const,
+      path: '/api/agent-handoff',
+      input: z.object({
+        runId: z.string(),
+        agentId: z.string(),
+        envelope: z.any(),
+      }),
+      responses: {
+        201: z.custom<typeof agentHandoffs.$inferSelect>(),
+        400: errorSchemas.validation,
+      },
+    },
+    get: {
+      method: 'GET' as const,
+      path: '/api/agent-handoff/:runId',
+      responses: {
+        200: z.custom<typeof agentHandoffs.$inferSelect>(),
+        404: errorSchemas.notFound,
+      },
+    },
+  },
 };
 
 export function buildUrl(path: string, params?: Record<string, string | number>): string {

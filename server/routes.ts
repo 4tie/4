@@ -20,6 +20,228 @@ import { Phase11Signals } from "./utils/backtest-diagnostic/phase11-signals";
 import { BacktestParser } from "./utils/backtest-diagnostic/parser";
 import { v4 as uuidv4 } from "uuid";
 
+type DiagnosticProgress = {
+  percent: number;
+  currentPhase: string;
+  phasesCompleted: string[];
+};
+
+const diagnosticQueue: string[] = [];
+let diagnosticWorkerRunning = false;
+
+async function enqueueDiagnosticJob(jobId: string) {
+  diagnosticQueue.push(jobId);
+  if (!diagnosticWorkerRunning) {
+    processDiagnosticQueue().catch((err) => {
+      console.error("Diagnostic queue error:", err);
+    });
+  }
+}
+
+async function processDiagnosticQueue() {
+  if (diagnosticWorkerRunning) return;
+  diagnosticWorkerRunning = true;
+  try {
+    while (diagnosticQueue.length > 0) {
+      const jobId = diagnosticQueue.shift();
+      if (!jobId) continue;
+      await runDiagnosticJob(jobId);
+    }
+  } finally {
+    diagnosticWorkerRunning = false;
+  }
+}
+
+async function updateDiagnosticProgress(jobId: string, progress: DiagnosticProgress) {
+  await storage.updateDiagnosticJob(jobId, { progress });
+}
+
+async function runDiagnosticJob(jobId: string) {
+  const job = await storage.getDiagnosticJob(jobId);
+  if (!job) return;
+
+  await storage.updateDiagnosticJob(jobId, {
+    status: "running",
+    startedAt: new Date(),
+    progress: { percent: 0, currentPhase: "phase1", phasesCompleted: [] } as DiagnosticProgress,
+  });
+
+  try {
+    const parser = new BacktestParser();
+    const backtestData = parser.parse(String(job.backtestId));
+    if (!backtestData) {
+      await storage.updateDiagnosticJob(jobId, {
+        status: "failed",
+        error: "Backtest results not found",
+        finishedAt: new Date(),
+        progress: { percent: 100, currentPhase: "failed", phasesCompleted: [] } as DiagnosticProgress,
+      });
+      return;
+    }
+
+    let strategyContent = "";
+    if (job.strategyPath) {
+      const file = await storage.getFileByPath(job.strategyPath);
+      strategyContent = file?.content || "";
+    }
+
+    const backtest = await storage.getBacktest(job.backtestId);
+    const cfg = (backtest as any)?.config;
+    const timerange = String(cfg?.timerange || "") || buildTimerange(cfg?.backtest_date_from, cfg?.backtest_date_to) || "unknown";
+    const timeframe =
+      backtestData.strategy?.[Object.keys(backtestData.strategy)[0]]?.timeframe ||
+      cfg?.timeframe ||
+      "unknown";
+
+    const progress = (percent: number, currentPhase: string, phasesCompleted: string[]) =>
+      updateDiagnosticProgress(jobId, { percent, currentPhase, phasesCompleted });
+
+    const phase1 = new Phase1Structural();
+    const structuralReport = await phase1.analyze(backtestData, strategyContent, { backtestId: job.backtestId });
+    await progress(10, "phase2", ["phase1"]);
+
+    const reportId = uuidv4();
+
+    const shouldFailFast = String(structuralReport?.verdict || "").toUpperCase() === "FAIL";
+    let fullReport: any = null;
+
+    let finalPhasesCompleted: string[] = [];
+
+    if (shouldFailFast) {
+      const phase11 = new Phase11Signals();
+      const failureSignalsReport = phase11.analyze({
+        phase1: { structuralIntegrity: structuralReport },
+      });
+      const phase10 = new Phase10Report();
+      const finalSummary = phase10.analyze({
+        phase1: { structuralIntegrity: structuralReport },
+      });
+
+      fullReport = {
+        metadata: {
+          reportId,
+          timestamp: new Date().toISOString(),
+          backtestId: String(job.backtestId),
+          strategy: job.strategyPath || "unknown",
+          timeframe,
+          timerange,
+          stopReason: "Phase 1 structural integrity failed",
+        },
+        phase1: { structuralIntegrity: structuralReport },
+        phase11: { failureSignals: failureSignalsReport },
+        summary: finalSummary,
+      };
+
+      finalPhasesCompleted = ["phase1", "phase10", "phase11"];
+      await progress(100, "completed", finalPhasesCompleted);
+    } else {
+      const phase2 = new Phase2Performance();
+      const performanceReport = phase2.analyze(backtestData);
+      await progress(20, "phase3", ["phase1", "phase2"]);
+
+      const phase3 = new Phase3Drawdown();
+      const drawdownRiskReport = phase3.analyze(backtestData);
+      await progress(30, "phase4", ["phase1", "phase2", "phase3"]);
+
+      const phase4 = new Phase4EntryQuality();
+      const entryQualityReport = phase4.analyze(backtestData);
+      await progress(40, "phase5", ["phase1", "phase2", "phase3", "phase4"]);
+
+      const phase5 = new Phase5Exit();
+      const exitLogicReport = phase5.analyze(backtestData);
+      await progress(50, "phase6", ["phase1", "phase2", "phase3", "phase4", "phase5"]);
+
+      const phase6 = new Phase6Regime();
+      const regimeAnalysisReport = await phase6.analyze(backtestData);
+      await progress(60, "phase7", ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6"]);
+
+      const phase7 = new Phase7Costs();
+      const costAnalysisReport = await phase7.analyze(backtestData);
+      await progress(70, "phase8", ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "phase7"]);
+
+      const phase8 = new Phase8Logic();
+      const logicIntegrityReport = phase8.analyze(strategyContent);
+      await progress(80, "phase9", ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8"]);
+
+      const phase9 = new Phase9Statistics();
+      const statisticsReport = phase9.analyze(backtestData);
+      await progress(90, "phase10", ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"]);
+
+      const phase11 = new Phase11Signals();
+      const failureSignalsReport = phase11.analyze({
+        phase1: { structuralIntegrity: structuralReport },
+        phase2: { performance: performanceReport },
+        phase3: { drawdownRisk: drawdownRiskReport },
+        phase6: { regimeAnalysis: regimeAnalysisReport },
+        phase7: { costAnalysis: costAnalysisReport },
+        phase8: { logicIntegrity: logicIntegrityReport },
+        phase9: { statistics: statisticsReport },
+      });
+
+      const phase10 = new Phase10Report();
+      const finalSummary = phase10.analyze({
+        phase1: { structuralIntegrity: structuralReport },
+        phase2: { performance: performanceReport },
+        phase3: { drawdownRisk: drawdownRiskReport },
+        phase4: { entryQuality: entryQualityReport },
+        phase5: { exitLogic: exitLogicReport },
+        phase6: { regimeAnalysis: regimeAnalysisReport },
+        phase7: { costAnalysis: costAnalysisReport },
+        phase8: { logicIntegrity: logicIntegrityReport },
+        phase9: { statistics: statisticsReport },
+      });
+
+      fullReport = {
+        metadata: {
+          reportId,
+          timestamp: new Date().toISOString(),
+          backtestId: String(job.backtestId),
+          strategy: job.strategyPath || "unknown",
+          timeframe,
+          timerange,
+        },
+        phase1: { structuralIntegrity: structuralReport },
+        phase2: { performance: performanceReport },
+        phase3: { drawdownRisk: drawdownRiskReport },
+        phase4: { entryQuality: entryQualityReport },
+        phase5: { exitLogic: exitLogicReport },
+        phase6: { regimeAnalysis: regimeAnalysisReport },
+        phase7: { costAnalysis: costAnalysisReport },
+        phase8: { logicIntegrity: logicIntegrityReport },
+        phase9: { statistics: statisticsReport },
+        phase11: { failureSignals: failureSignalsReport },
+        summary: finalSummary,
+      };
+
+      finalPhasesCompleted = ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9", "phase10"];
+      await progress(100, "completed", finalPhasesCompleted);
+    }
+
+    await storage.createDiagnosticReport({
+      reportId,
+      backtestId: Number(job.backtestId),
+      strategy: job.strategyPath || "unknown",
+      timeframe,
+      timerange,
+      report: fullReport,
+    });
+
+    await storage.updateDiagnosticJob(jobId, {
+      status: "completed",
+      reportId,
+      finishedAt: new Date(),
+      progress: { percent: 100, currentPhase: "completed", phasesCompleted: finalPhasesCompleted } as DiagnosticProgress,
+    });
+  } catch (error: any) {
+    await storage.updateDiagnosticJob(jobId, {
+      status: "failed",
+      error: error?.message || "Diagnostic failed",
+      finishedAt: new Date(),
+      progress: { percent: 100, currentPhase: "failed", phasesCompleted: [] } as DiagnosticProgress,
+    });
+  }
+}
+
 let cachedFreeModels:
   | Array<{ id: string; name: string; description?: string }>
   | null = null;
@@ -855,134 +1077,219 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
   });
 
   app.post("/api/diagnostic/analyze", async (req, res) => {
-    const { backtestId, strategyPath } = req.body;
-    
     try {
-      const parser = new BacktestParser();
-      const backtestData = parser.parse(backtestId);
-      
-      if (!backtestData) {
-        return res.status(404).json({ error: "Backtest results not found" });
-      }
+      const input = z.object({
+        backtestId: z.number(),
+        strategyPath: z.string().optional(),
+      }).parse(req.body);
 
-      let strategyContent = "";
-      if (strategyPath) {
-        const file = await storage.getFileByPath(strategyPath);
-        strategyContent = file?.content || "";
-      }
+      const jobId = uuidv4();
+      await storage.createDiagnosticJob({
+        id: jobId,
+        backtestId: input.backtestId,
+        strategyPath: input.strategyPath || null,
+        status: "queued",
+        progress: { percent: 0, currentPhase: "queued", phasesCompleted: [] },
+      } as any);
 
-      const phase1 = new Phase1Structural();
-      const structuralReport = await phase1.analyze(backtestData, strategyContent, { backtestId });
-
-      const phase2 = new Phase2Performance();
-      const performanceReport = phase2.analyze(backtestData);
-
-      const phase3 = new Phase3Drawdown();
-      const drawdownRiskReport = phase3.analyze(backtestData);
-
-      const phase4 = new Phase4EntryQuality();
-      const entryQualityReport = phase4.analyze(backtestData);
-
-      const phase5 = new Phase5Exit();
-      const exitLogicReport = phase5.analyze(backtestData);
-
-      const phase6 = new Phase6Regime();
-      const regimeAnalysisReport = await phase6.analyze(backtestData);
-
-      const phase7 = new Phase7Costs();
-      const costAnalysisReport = await phase7.analyze(backtestData);
-
-      const phase8 = new Phase8Logic();
-      const logicIntegrityReport = phase8.analyze(strategyContent);
-
-      const phase9 = new Phase9Statistics();
-      const statisticsReport = phase9.analyze(backtestData);
-
-      const phase11 = new Phase11Signals();
-      const failureSignalsReport = phase11.analyze({
-        phase1: { structuralIntegrity: structuralReport },
-        phase2: { performance: performanceReport },
-        phase3: { drawdownRisk: drawdownRiskReport },
-        phase6: { regimeAnalysis: regimeAnalysisReport },
-        phase7: { costAnalysis: costAnalysisReport },
-        phase8: { logicIntegrity: logicIntegrityReport },
-        phase9: { statistics: statisticsReport },
-      });
-
-      const phase10 = new Phase10Report();
-      const finalSummary = phase10.analyze({
-        phase1: { structuralIntegrity: structuralReport },
-        phase2: { performance: performanceReport },
-        phase3: { drawdownRisk: drawdownRiskReport },
-        phase4: { entryQuality: entryQualityReport },
-        phase5: { exitLogic: exitLogicReport },
-        phase6: { regimeAnalysis: regimeAnalysisReport },
-        phase7: { costAnalysis: costAnalysisReport },
-        phase8: { logicIntegrity: logicIntegrityReport },
-        phase9: { statistics: statisticsReport },
-      });
-
-      const reportId = uuidv4();
-      const fullReport = {
-        metadata: {
-          reportId,
-          timestamp: new Date().toISOString(),
-          backtestId: String(backtestId),
-          strategy: strategyPath || "unknown",
-          timeframe: backtestData.strategy?.[Object.keys(backtestData.strategy)[0]]?.timeframe || "unknown",
-          timerange: "unknown"
-        },
-        phase1: {
-          structuralIntegrity: structuralReport
-        },
-        phase2: {
-          performance: performanceReport
-        },
-        phase3: {
-          drawdownRisk: drawdownRiskReport
-        },
-        phase4: {
-          entryQuality: entryQualityReport
-        },
-        phase5: {
-          exitLogic: exitLogicReport
-        },
-        phase6: {
-          regimeAnalysis: regimeAnalysisReport
-        },
-        phase7: {
-          costAnalysis: costAnalysisReport
-        },
-        phase8: {
-          logicIntegrity: logicIntegrityReport
-        },
-        phase9: {
-          statistics: statisticsReport
-        },
-        phase11: {
-          failureSignals: failureSignalsReport
-        },
-        summary: finalSummary
-      };
-
-      await storage.createDiagnosticReport({
-        reportId,
-        backtestId: Number(backtestId),
-        strategy: strategyPath || "unknown",
-        timeframe: fullReport.metadata.timeframe,
-        timerange: fullReport.metadata.timerange,
-        report: fullReport
-      });
-
-      res.json(fullReport);
+      enqueueDiagnosticJob(jobId).catch(() => {});
+      res.status(202).json({ jobId, status: "queued" });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors[0]?.message || "Invalid request" });
+      }
+      res.status(500).json({ error: error.message || "Failed to start diagnostics" });
     }
+  });
+
+  app.get("/api/diagnostic/jobs", async (req, res) => {
+    const backtestIdRaw = req.query.backtestId ? Number(req.query.backtestId) : undefined;
+    const jobs = await storage.getDiagnosticJobs(Number.isFinite(backtestIdRaw as any) ? backtestIdRaw : undefined);
+    res.json(jobs);
+  });
+
+  app.get("/api/diagnostic/jobs/:jobId", async (req, res) => {
+    const job = await storage.getDiagnosticJob(String(req.params.jobId));
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    res.json(job);
+  });
+
+  app.get("/api/diagnostic/jobs/:jobId/result", async (req, res) => {
+    const job = await storage.getDiagnosticJob(String(req.params.jobId));
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    if (!job.reportId) return res.status(404).json({ error: "Report not ready" });
+    const report = await storage.getDiagnosticReportByReportId(job.reportId);
+    if (!report) return res.status(404).json({ error: "Report not found" });
+    res.json(report);
+  });
+
+  app.get("/api/diagnostic/reports", async (req, res) => {
+    const reports = await storage.getDiagnosticReports();
+    res.json(reports);
   });
 
   app.get("/api/diagnostic/reports/:backtestId", async (req, res) => {
     const reports = await storage.getDiagnosticReports(Number(req.params.backtestId));
     res.json(reports);
+  });
+
+  // === Chat Persistence ===
+  app.get("/api/chat/sessions", async (req, res) => {
+    const sessionKey = typeof req.query.sessionKey === "string" ? req.query.sessionKey : "";
+    if (!sessionKey) return res.json([]);
+    const session = await storage.getAiChatSessionByKey(sessionKey);
+    res.json(session ? [session] : []);
+  });
+
+  app.post("/api/chat/sessions", async (req, res) => {
+    try {
+      const input = z.object({
+        sessionKey: z.string(),
+        strategyPath: z.string().optional(),
+        backtestId: z.number().optional(),
+      }).parse(req.body);
+      const session = await storage.getOrCreateAiChatSession(
+        input.sessionKey,
+        input.strategyPath ?? null,
+        input.backtestId ?? null,
+      );
+      res.status(201).json(session);
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0]?.message || "Invalid request" });
+      }
+      res.status(500).json({ message: "Failed to create session" });
+    }
+  });
+
+  app.get("/api/chat/sessions/:id/messages", async (req, res) => {
+    const sessionId = Number(req.params.id);
+    if (!Number.isFinite(sessionId)) return res.status(400).json({ message: "Invalid session id" });
+    const sinceRaw = typeof req.query.since === "string" ? req.query.since : null;
+    const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : null;
+    const since = sinceRaw ? new Date(sinceRaw) : null;
+    const messages = await storage.getAiChatMessages(sessionId, Number.isFinite(since?.getTime()) ? since : null);
+    if (Number.isFinite(limitRaw) && limitRaw && limitRaw > 0) {
+      return res.json(messages.slice(-limitRaw));
+    }
+    res.json(messages);
+  });
+
+  app.post("/api/chat/sessions/:id/messages", async (req, res) => {
+    try {
+      const sessionId = Number(req.params.id);
+      if (!Number.isFinite(sessionId)) return res.status(400).json({ message: "Invalid session id" });
+      const input = z.object({
+        role: z.string(),
+        content: z.string(),
+        model: z.string().optional(),
+        request: z.any().optional(),
+        response: z.any().optional(),
+      }).parse(req.body);
+      const message = await storage.createAiChatMessage({
+        sessionId,
+        role: input.role,
+        content: input.content,
+        model: input.model,
+        request: input.request,
+        response: input.response,
+      } as any);
+      res.status(201).json(message);
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0]?.message || "Invalid request" });
+      }
+      res.status(500).json({ message: "Failed to create message" });
+    }
+  });
+
+  // === AI Actions ===
+  app.get("/api/ai-actions", async (req, res) => {
+    const sessionIdRaw = typeof req.query.sessionId === "string" ? Number(req.query.sessionId) : undefined;
+    const backtestIdRaw = typeof req.query.backtestId === "string" ? Number(req.query.backtestId) : undefined;
+    const sessionId = Number.isFinite(sessionIdRaw as any) ? sessionIdRaw : undefined;
+    const backtestId = Number.isFinite(backtestIdRaw as any) ? backtestIdRaw : undefined;
+    const actions = await storage.getAiActions(sessionId, backtestId);
+    res.json(actions);
+  });
+
+  app.get("/api/ai-actions/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
+    const action = await storage.getAiAction(id);
+    if (!action) return res.status(404).json({ message: "Not found" });
+    res.json(action);
+  });
+
+  app.get("/api/backtests/:id/ai-actions", async (req, res) => {
+    const backtestId = Number(req.params.id);
+    if (!Number.isFinite(backtestId)) return res.status(400).json({ message: "Invalid backtest id" });
+    const actions = await storage.getAiActionsForBacktest(backtestId);
+    res.json(actions);
+  });
+
+  app.post("/api/ai-actions", async (req, res) => {
+    try {
+      const input = z.object({
+        sessionId: z.number().optional(),
+        messageId: z.number().optional(),
+        actionType: z.string(),
+        description: z.string(),
+        beforeState: z.any().optional(),
+        afterState: z.any().optional(),
+        diff: z.any().optional(),
+        backtestId: z.number().optional(),
+        diagnosticReportId: z.number().optional(),
+        results: z.any().optional(),
+      }).parse(req.body);
+      const action = await storage.createAiAction({
+        sessionId: input.sessionId ?? null,
+        messageId: input.messageId ?? null,
+        actionType: input.actionType,
+        description: input.description,
+        beforeState: input.beforeState,
+        afterState: input.afterState,
+        diff: input.diff,
+        backtestId: input.backtestId ?? null,
+        diagnosticReportId: input.diagnosticReportId ?? null,
+        results: input.results,
+      } as any);
+      res.status(201).json(action);
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0]?.message || "Invalid request" });
+      }
+      res.status(500).json({ message: "Failed to create AI action" });
+    }
+  });
+
+  // === Agent Handoff ===
+  app.post("/api/agent-handoff", async (req, res) => {
+    try {
+      const input = z.object({
+        runId: z.string(),
+        agentId: z.string(),
+        envelope: z.any(),
+      }).parse(req.body);
+      const handoff = await storage.createAgentHandoff({
+        runId: input.runId,
+        agentId: input.agentId,
+        envelope: input.envelope,
+      } as any);
+      res.status(201).json(handoff);
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0]?.message || "Invalid request" });
+      }
+      res.status(500).json({ message: "Failed to create handoff" });
+    }
+  });
+
+  app.get("/api/agent-handoff/:runId", async (req, res) => {
+    const runId = String(req.params.runId || "");
+    const handoff = await storage.getAgentHandoffByRunId(runId);
+    if (!handoff) return res.status(404).json({ message: "Not found" });
+    res.json(handoff);
   });
 
   // === Config Endpoints ===

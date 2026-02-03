@@ -84,6 +84,29 @@ export const aiAuditEvents = pgTable("ai_audit_events", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const aiActions = pgTable("ai_actions", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => aiChatSessions.id),
+  messageId: integer("message_id").references(() => aiChatMessages.id),
+  actionType: text("action_type").notNull(),
+  description: text("description").notNull(),
+  beforeState: jsonb("before_state"),
+  afterState: jsonb("after_state"),
+  diff: jsonb("diff"),
+  backtestId: integer("backtest_id").references(() => backtests.id),
+  diagnosticReportId: integer("diagnostic_report_id").references(() => diagnosticReports.id),
+  results: jsonb("results"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const agentHandoffs = pgTable("agent_handoffs", {
+  id: serial("id").primaryKey(),
+  runId: text("run_id").notNull(),
+  agentId: text("agent_id").notNull(),
+  envelope: jsonb("envelope").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertDiagnosticReportSchema = createInsertSchema(diagnosticReports).omit({ id: true, createdAt: true });
 export type DiagnosticReport = typeof diagnosticReports.$inferSelect;
 export type InsertDiagnosticReport = z.infer<typeof insertDiagnosticReportSchema>;
@@ -104,6 +127,14 @@ export const insertAiAuditEventSchema = createInsertSchema(aiAuditEvents).omit({
 export type AiAuditEvent = typeof aiAuditEvents.$inferSelect;
 export type InsertAiAuditEvent = z.infer<typeof insertAiAuditEventSchema>;
 
+export const insertAiActionSchema = createInsertSchema(aiActions).omit({ id: true, createdAt: true });
+export type AiAction = typeof aiActions.$inferSelect;
+export type InsertAiAction = z.infer<typeof insertAiActionSchema>;
+
+export const insertAgentHandoffSchema = createInsertSchema(agentHandoffs).omit({ id: true, createdAt: true });
+export type AgentHandoff = typeof agentHandoffs.$inferSelect;
+export type InsertAgentHandoff = z.infer<typeof insertAgentHandoffSchema>;
+
 // === SCHEMAS ===
 export const insertFileSchema = createInsertSchema(files).omit({ id: true, lastModified: true });
 export const insertBacktestSchema = createInsertSchema(backtests).omit({ id: true, createdAt: true, logs: true, results: true, status: true });
@@ -115,6 +146,35 @@ export type InsertFile = z.infer<typeof insertFileSchema>;
 
 export type Backtest = typeof backtests.$inferSelect;
 export type InsertBacktest = z.infer<typeof insertBacktestSchema>;
+
+export interface AgentHandoffEnvelope {
+  runId: string;
+  agentId: "diagnostic" | "fix_design" | "implementation" | "validation";
+  createdAt: string;
+  inputs: {
+    backtestId: number;
+    strategyPath: string;
+    configSnapshotPath?: string;
+    chatSessionId?: number;
+  };
+  artifacts: {
+    diagnosticReportId?: number;
+    diagnosticSummary: string;
+    evidenceIndex: Array<{ phase: string; keyMetric: string; value: string; sourcePath?: string }>;
+    recommendedChangeTypes: string[];
+  };
+  aiActions: Array<{ actionId: string; type: string; description: string; result: "success" | "failure" }>;
+  constraints: {
+    productionSafe: boolean;
+    maxLeverage: number;
+    allowLookAhead: boolean;
+  };
+  next: {
+    recommendedNextAgent: string;
+    questionsForNextAgent: string[];
+    stopReason?: string;
+  };
+}
 
 export type UserPreference = typeof userPreferences.$inferSelect;
 export type InsertUserPreference = z.infer<typeof insertUserPreferenceSchema>;

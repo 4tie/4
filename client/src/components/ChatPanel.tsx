@@ -3,12 +3,13 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, PanelRightClose, PanelRightOpen, Zap, BarChart3, Eye } from "lucide-react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { useAIStore } from "@/hooks/use-ai";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, buildUrl } from "@shared/routes";
+import { AIActionTimeline } from "@/components/ai/AIActionTimeline";
 
 interface ChatContext {
   fileName?: string;
@@ -351,6 +352,8 @@ const shouldWarnFunctionMismatch = (
 export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfig, onApplyAndSaveCode }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [sessionId, setSessionId] = useState<number | null>(null);
+  const [hydrated, setHydrated] = useState(false);
   const [autoExplain, setAutoExplain] = useState<boolean>(() => {
     try {
       const raw = localStorage.getItem("chat:autoExplainRefinement");
@@ -377,6 +380,11 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
   const refinementRef = useRef<RefinementState | null>(null);
   const announcedCompletedRef = useRef<Set<number>>(new Set());
   const hasSelection = Boolean(context.selectedCode && String(context.selectedCode).trim().length > 0);
+  const sessionKey = useMemo(() => {
+    const strategy = context.fileName ? String(context.fileName) : "global";
+    const backtest = context.lastBacktest?.id != null ? String(context.lastBacktest.id) : "none";
+    return `${strategy}::${backtest}`;
+  }, [context.fileName, context.lastBacktest?.id]);
   const enclosingFunctionBlock = useMemo(() => {
     return inferEnclosingPythonFunctionBlockFromFile(context.fileContent, context.lineNumber);
   }, [context.fileContent, context.lineNumber]);
@@ -391,6 +399,16 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     String(context.fileName).startsWith("user_data/strategies/") &&
     String(context.fileName).endsWith(".py");
 
+  const { data: aiActions } = useQuery({
+    queryKey: ["/api/ai-actions", sessionId],
+    enabled: Boolean(sessionId),
+    queryFn: async () => {
+      const res = await fetch(`/api/ai-actions?sessionId=${sessionId}`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+  });
+
   const pushMessage = (role: Message["role"], content: string) => {
     setMessages((prev) => [
       ...prev,
@@ -401,6 +419,67 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
         timestamp: new Date(),
       },
     ]);
+  };
+
+  const persistMessage = async (payload: {
+    role: "user" | "assistant" | "system";
+    content: string;
+    model?: string;
+    request?: any;
+    response?: any;
+  }) => {
+    if (!sessionId) return;
+    try {
+      await fetch(`/api/chat/sessions/${sessionId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      // ignore persistence errors
+    }
+  };
+
+  const createAiAction = async (payload: {
+    actionType: string;
+    description: string;
+    beforeState?: any;
+    afterState?: any;
+    diff?: any;
+    backtestId?: number;
+    diagnosticReportId?: number;
+    results?: any;
+  }) => {
+    try {
+      await fetch("/api/ai-actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: sessionId ?? undefined,
+          ...payload,
+        }),
+      });
+    } catch {
+      // ignore action logging errors
+    }
+  };
+
+  const logCodeChange = (code: string, mode: "selection" | "cursor" | "enclosingFunction") => {
+    const before = mode === "selection" ? context.selectedCode : (mode === "enclosingFunction" ? enclosingFunctionBlock?.code : null);
+    createAiAction({
+      actionType: "code_change",
+      description: `Applied AI code suggestion (${mode}).`,
+      beforeState: { mode, selection: before || "" },
+      afterState: { mode, code },
+    });
+  };
+
+  const logConfigChange = (patch: Record<string, unknown>) => {
+    createAiAction({
+      actionType: "config_change",
+      description: "Applied AI config patch.",
+      afterState: { patch },
+    });
   };
 
   const toNum = (value: unknown): number => {
@@ -648,6 +727,12 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                   timestamp: new Date(),
                 },
               ]);
+              createAiAction({
+                actionType: "analysis",
+                description: `Auto-analysis requested for backtest ${s.id}`,
+                backtestId: s.id,
+                results: { summary: { profit: pPct, winRate: wrPct, drawdown: ddPct, trades: tr } },
+              });
               chatMutation.mutate(prompt);
             }
 
@@ -677,6 +762,11 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                   timestamp: new Date(),
                 },
               ]);
+              createAiAction({
+                actionType: "analysis",
+                description: "Auto-analysis requested for batch backtests",
+                results: { summaries: lines },
+              });
               chatMutation.mutate(prompt);
             }
           }
@@ -741,6 +831,12 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
         return;
       }
       pushMessage("assistant", `Backtest started (ID ${id}). Status: running…`);
+      createAiAction({
+        actionType: "backtest_run",
+        description: `Backtest started (ID ${id})`,
+        backtestId: id,
+        results: { strategyName, config: payload?.config },
+      });
       startRefinementPolling(strategyName, [id], "single");
     } catch (e: any) {
       pushMessage("assistant", `Error running backtest: ${e?.message || "Failed to run backtest"}`);
@@ -785,6 +881,11 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
         return;
       }
       pushMessage("assistant", `Batch started (${data?.batchId ?? "?"}). Tracking ${ids.length} runs: ${ids.join(", ")}`);
+      createAiAction({
+        actionType: "backtest_run",
+        description: `Batch backtest started (${data?.batchId ?? "?"})`,
+        results: { strategyName, baseConfig: payload?.baseConfig, ids, batchId: data?.batchId },
+      });
       startRefinementPolling(strategyName, ids, "batch");
     } catch (e: any) {
       pushMessage("assistant", `Error running batch: ${e?.message || "Failed to run batch"}`);
@@ -824,6 +925,12 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
           timestamp: new Date(),
         },
       ]);
+      persistMessage({
+        role: "assistant",
+        content: data.response,
+        model: selectedModel,
+        response: { content: data.response },
+      });
       // Optional: Auto-scroll is handled by useEffect
     },
     onError: (error: any) => {
@@ -860,6 +967,53 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     },
   });
 
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const loadSession = async () => {
+      setHydrated(false);
+      try {
+        const res = await fetch(`/api/chat/sessions?sessionKey=${encodeURIComponent(sessionKey)}`);
+        const data = await res.json();
+        let session = Array.isArray(data) ? data[0] : null;
+        if (!session) {
+          const createRes = await fetch("/api/chat/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionKey,
+              strategyPath: context.fileName,
+              backtestId: context.lastBacktest?.id,
+            }),
+          });
+          session = await createRes.json();
+        }
+        if (cancelled) return;
+        setSessionId(session?.id ?? null);
+        if (session?.id) {
+          const msgRes = await fetch(`/api/chat/sessions/${session.id}/messages?limit=50`);
+          const msgs = await msgRes.json();
+          if (cancelled) return;
+          const mapped: Message[] = Array.isArray(msgs)
+            ? msgs.map((m: any) => ({
+                id: String(m.id),
+                role: m.role === "assistant" ? "assistant" : "user",
+                content: String(m.content || ""),
+                timestamp: m.createdAt ? new Date(m.createdAt) : new Date(),
+              }))
+            : [];
+          setMessages(mapped);
+        }
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    };
+    loadSession().catch(() => setHydrated(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, sessionKey, context.fileName, context.lastBacktest?.id]);
+
   const runBatchMutation = useMutation({
     mutationFn: async (payload: any) => {
       const res = await apiRequest("POST", api.backtests.batchRun.path, payload);
@@ -886,7 +1040,11 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
       setInput(prev => prev + (prev ? "\n\n" : "") + e.detail);
     };
     window.addEventListener('attach-backtest-results', handleAttach);
-    return () => window.removeEventListener('attach-backtest-results', handleAttach);
+    window.addEventListener('attach-diagnostic-summary', handleAttach);
+    return () => {
+      window.removeEventListener('attach-backtest-results', handleAttach);
+      window.removeEventListener('attach-diagnostic-summary', handleAttach);
+    };
   }, []);
 
   useEffect(() => {
@@ -923,6 +1081,18 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    persistMessage({
+      role: "user",
+      content: input.trim(),
+      model: selectedModel,
+      request: {
+        context: {
+          fileName: context.fileName,
+          lineNumber: context.lineNumber,
+          lastBacktest: context.lastBacktest,
+        },
+      },
+    });
     chatMutation.mutate(input.trim());
     setInput("");
   };
@@ -1033,6 +1203,12 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
         </div>
       )}
 
+      {Array.isArray(aiActions) && aiActions.length > 0 && (
+        <div className="px-3 py-2 border-b border-border/30 bg-background/80">
+          <AIActionTimeline actions={aiActions} variant="compact" />
+        </div>
+      )}
+
       {refinement && refinement.stage !== "idle" && (
         <div className="px-3 py-2 border-b border-border/30 bg-background">
           <div className="rounded-md border border-border/40 bg-muted/30 px-3 py-2">
@@ -1069,6 +1245,9 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
 
       <ScrollArea ref={scrollRef} className="flex-1 p-3">
         <div className="space-y-4">
+          {!hydrated && (
+            <div className="text-xs text-muted-foreground">Loading chat history...</div>
+          )}
           {messages.length === 0 && (
             <div className="text-center text-muted-foreground text-sm py-8 space-y-4">
               <Bot className="w-10 h-10 mx-auto mb-3 opacity-30" />
@@ -1269,6 +1448,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                   if (!ok) return;
                                 }
                                 onApplyCode?.(block.code, applyMode);
+                                logCodeChange(block.code, applyMode);
                               }}
                             >
                               <Code className="w-3 h-3" />
@@ -1297,6 +1477,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                 const ok = confirm("Apply this change and save the strategy file now?");
                                 if (!ok) return;
                                 onApplyAndSaveCode?.(block.code, applyMode);
+                                logCodeChange(block.code, applyMode);
                               }}
                             >
                               <Save className="w-3 h-3" />
@@ -1308,7 +1489,10 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                               size="sm"
                               variant="outline"
                               className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
-                              onClick={() => onApplyConfig?.(patch)}
+                              onClick={() => {
+                                onApplyConfig?.(patch);
+                                logConfigChange(patch);
+                              }}
                             >
                               <FileCode className="w-3 h-3" />
                               Apply Config
@@ -1378,6 +1562,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
               onClick={() => {
                 if (!preview) return;
                 onApplyCode?.(preview.proposed, preview.mode);
+                logCodeChange(preview.proposed, preview.mode);
                 setPreview(null);
               }}
               disabled={!onApplyCode}
@@ -1389,6 +1574,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
               onClick={() => {
                 if (!preview) return;
                 onApplyAndSaveCode?.(preview.proposed, preview.mode);
+                logCodeChange(preview.proposed, preview.mode);
                 setPreview(null);
               }}
               disabled={!canApplyAndSave || !onApplyAndSaveCode}

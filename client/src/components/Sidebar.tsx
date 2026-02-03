@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { FolderTree, MessageSquare, History, Settings, Plus, FileCode, Trash2, Sun, Moon } from "lucide-react";
+import { FolderTree, MessageSquare, History, Settings, Plus, FileCode, Trash2, Sun, Moon, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -34,9 +34,22 @@ interface SidebarProps {
   onBacktestSelect: () => void; // Switch main view to backtest list
   selectedStrategyName?: string | null;
   onViewBacktest?: (backtestId: number) => void;
+  showDiagnosticsIcon?: boolean;
+  diagnosticsActive?: boolean;
+  onDiagnosticsSelect?: () => void;
 }
 
-export function Sidebar({ activeTab, setActiveTab, onFileSelect, onBacktestSelect, selectedStrategyName, onViewBacktest }: SidebarProps) {
+export function Sidebar({
+  activeTab,
+  setActiveTab,
+  onFileSelect,
+  onBacktestSelect,
+  selectedStrategyName,
+  onViewBacktest,
+  showDiagnosticsIcon,
+  diagnosticsActive,
+  onDiagnosticsSelect,
+}: SidebarProps) {
   const { theme, setTheme } = useTheme();
   return (
     <div className="h-full flex flex-col bg-secondary/30 border-r border-border">
@@ -57,6 +70,14 @@ export function Sidebar({ activeTab, setActiveTab, onFileSelect, onBacktestSelec
           }}
           tooltip="Backtests"
         />
+        {showDiagnosticsIcon && (
+          <SidebarIcon
+            icon={<Activity className="w-5 h-5" />}
+            isActive={Boolean(diagnosticsActive)}
+            onClick={() => onDiagnosticsSelect?.()}
+            tooltip="Diagnostics"
+          />
+        )}
       </div>
 
       {/* Sidebar Content */}
