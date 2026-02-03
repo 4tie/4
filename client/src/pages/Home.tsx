@@ -624,6 +624,19 @@ export default function Home() {
                 } : undefined,
               }}
               onApplyCode={(code, mode) => {
+                const inferFnName = (src: string): string | null => {
+                  const m = String(src || "").match(/\bdef\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/m);
+                  return m && m[1] ? String(m[1]) : null;
+                };
+                const isSingleFunctionSnippet = (src: string): string | null => {
+                  const text = String(src || "");
+                  if (/\bclass\s+[A-Za-z_][A-Za-z0-9_]*\b/.test(text)) return null;
+                  const defs = text.match(/\bdef\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/g) || [];
+                  if (defs.length !== 1) return null;
+                  return inferFnName(text);
+                };
+
+                const fnName = isSingleFunctionSnippet(code);
                 if (mode === "enclosingFunction") {
                   const ok = editorRef.current?.replaceEnclosingFunction(code);
                   if (!ok) {
@@ -635,10 +648,42 @@ export default function Home() {
                   return;
                 }
 
+                if (mode === "namedFunction" && fnName) {
+                  const ok = editorRef.current?.replaceFunctionByName(fnName, code);
+                  if (ok) {
+                    setChatSystemMessage(`AI code suggestion applied (replaced '${fnName}')`);
+                    return;
+                  }
+                  editorRef.current?.applyCode(code);
+                  setChatSystemMessage(`Could not find '${fnName}' in file; inserted at cursor instead`);
+                  return;
+                }
+
+                // If the AI returns a single function, prefer replacing by name (safer than blind insert).
+                if (mode === "cursor" && fnName) {
+                  const ok = editorRef.current?.replaceFunctionByName(fnName, code);
+                  if (ok) {
+                    setChatSystemMessage(`AI code suggestion applied (replaced '${fnName}')`);
+                    return;
+                  }
+                }
+
                 editorRef.current?.applyCode(code);
                 setChatSystemMessage("AI code suggestion applied to editor");
               }}
               onApplyAndSaveCode={(code, mode) => {
+                const inferFnName = (src: string): string | null => {
+                  const m = String(src || "").match(/\bdef\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/m);
+                  return m && m[1] ? String(m[1]) : null;
+                };
+                const isSingleFunctionSnippet = (src: string): string | null => {
+                  const text = String(src || "");
+                  if (/\bclass\s+[A-Za-z_][A-Za-z0-9_]*\b/.test(text)) return null;
+                  const defs = text.match(/\bdef\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/g) || [];
+                  if (defs.length !== 1) return null;
+                  return inferFnName(text);
+                };
+
                 const p = (activeFile as any)?.path;
                 const isStrategy =
                   typeof p === "string" &&
@@ -649,14 +694,30 @@ export default function Home() {
                   return;
                 }
 
+                const fnName = isSingleFunctionSnippet(code);
+
                 if (mode === "enclosingFunction") {
                   const ok = editorRef.current?.replaceEnclosingFunction(code);
                   if (!ok) {
                     editorRef.current?.applyCode(code);
                     setChatSystemMessage("Could not find enclosing function; inserted at cursor instead");
                   }
+                } else if (mode === "namedFunction" && fnName) {
+                  const ok = editorRef.current?.replaceFunctionByName(fnName, code);
+                  if (!ok) {
+                    editorRef.current?.applyCode(code);
+                    setChatSystemMessage(`Could not find '${fnName}' in file; inserted at cursor instead`);
+                  }
                 } else {
-                  editorRef.current?.applyCode(code);
+                  // If the AI returns a single function, prefer replacing by name (safer than blind insert).
+                  if (mode === "cursor" && fnName) {
+                    const ok = editorRef.current?.replaceFunctionByName(fnName, code);
+                    if (!ok) {
+                      editorRef.current?.applyCode(code);
+                    }
+                  } else {
+                    editorRef.current?.applyCode(code);
+                  }
                 }
                 const nextContent = editorRef.current?.getValue?.() ?? editorContent;
 

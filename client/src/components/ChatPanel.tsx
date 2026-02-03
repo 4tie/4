@@ -90,9 +90,9 @@ interface ChatPanelProps {
   isOpen: boolean;
   onToggle: () => void;
   context: ChatContext;
-  onApplyCode?: (code: string, mode?: "selection" | "cursor" | "enclosingFunction") => void;
+  onApplyCode?: (code: string, mode?: "selection" | "cursor" | "enclosingFunction" | "namedFunction") => void;
   onApplyConfig?: (patch: Record<string, unknown>) => void;
-  onApplyAndSaveCode?: (code: string, mode?: "selection" | "cursor" | "enclosingFunction") => void;
+  onApplyAndSaveCode?: (code: string, mode?: "selection" | "cursor" | "enclosingFunction" | "namedFunction") => void;
 }
 
 export function ChatToggleButton({ isOpen, onToggle }: { isOpen: boolean; onToggle: () => void }) {
@@ -193,6 +193,14 @@ const parseConfigPatch = (block: ExtractedBlock): Record<string, unknown> | null
 const inferPythonFunctionName = (src: string): string | null => {
   const m = String(src || "").match(/\bdef\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/m);
   return m && m[1] ? String(m[1]) : null;
+};
+
+const inferSingleFunctionName = (src: string): string | null => {
+  const text = String(src || "");
+  if (/\bclass\s+[A-Za-z_][A-Za-z0-9_]*\b/.test(text)) return null;
+  const defs = text.match(/\bdef\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/g) || [];
+  if (defs.length !== 1) return null;
+  return inferPythonFunctionName(text);
 };
 
 const leadingIndent = (line: string) => {
@@ -321,6 +329,59 @@ const inferEnclosingPythonFunctionBlockFromFile = (
   return null;
 };
 
+const inferPythonFunctionBlockByNameFromFile = (
+  fileContent: string | undefined,
+  fnName: string | null | undefined,
+): { name: string; startLine: number; endLine: number; code: string } | null => {
+  const name = String(fnName || "").trim();
+  if (!fileContent || !name) return null;
+  const lines = String(fileContent).split(/\r?\n/);
+  const total = lines.length;
+  if (!total) return null;
+
+  const isTargetDef = (line: string) => new RegExp(`^\\s*def\\s+${name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\s*\\(`).test(line);
+
+  let defLine = -1;
+  for (let i = 1; i <= total; i++) {
+    if (isTargetDef(lines[i - 1] ?? "")) {
+      defLine = i;
+      break;
+    }
+  }
+  if (defLine === -1) return null;
+
+  const defIndent = leadingIndent(lines[defLine - 1] ?? "");
+  let startLine = defLine;
+  while (startLine > 1) {
+    const prev = lines[startLine - 2] ?? "";
+    if (!isPythonDecoratorLine(prev)) break;
+    if (leadingIndent(prev) !== defIndent) break;
+    startLine--;
+  }
+
+  let endLine = total;
+  for (let i = defLine + 1; i <= total; i++) {
+    const line = lines[i - 1] ?? "";
+    if (!String(line).trim()) continue;
+    const ind = leadingIndent(line);
+    if (ind < defIndent) {
+      endLine = i - 1;
+      break;
+    }
+    if (ind === defIndent && (isPythonDefLine(line) || isPythonDecoratorLine(line) || isPythonClassLine(line))) {
+      endLine = i - 1;
+      break;
+    }
+  }
+
+  return {
+    name,
+    startLine,
+    endLine,
+    code: lines.slice(startLine - 1, endLine).join("\n"),
+  };
+};
+
 const getCursorContextSnippet = (fileContent: string | undefined, lineNumber: number | undefined, radius = 6): string => {
   if (!fileContent) return "";
   const lines = String(fileContent).split(/\r?\n/);
@@ -366,7 +427,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
   const [refinement, setRefinement] = useState<RefinementState | null>(null);
   const [preview, setPreview] = useState<null | {
     title: string;
-    mode: "selection" | "cursor" | "enclosingFunction";
+    mode: "selection" | "cursor" | "enclosingFunction" | "namedFunction";
     currentLabel: string;
     current: string;
     proposed: string;
@@ -464,8 +525,17 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     }
   };
 
-  const logCodeChange = (code: string, mode: "selection" | "cursor" | "enclosingFunction") => {
-    const before = mode === "selection" ? context.selectedCode : (mode === "enclosingFunction" ? enclosingFunctionBlock?.code : null);
+  const logCodeChange = (code: string, mode: "selection" | "cursor" | "enclosingFunction" | "namedFunction") => {
+    const before = (() => {
+      if (mode === "selection") return context.selectedCode;
+      if (mode === "enclosingFunction") return enclosingFunctionBlock?.code ?? null;
+      if (mode === "namedFunction") {
+        const fn = inferSingleFunctionName(code);
+        const block = inferPythonFunctionBlockByNameFromFile(context.fileContent, fn);
+        return block?.code ?? null;
+      }
+      return null;
+    })();
     createAiAction({
       actionType: "code_change",
       description: `Applied AI code suggestion (${mode}).`,
@@ -1132,73 +1202,75 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
 
       {context.fileName && (
         <div className="px-3 py-2 border-b border-border/30 bg-primary/5">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
-              <FileCode className="w-3 h-3 text-primary" />
-              <span className="truncate font-medium">{context.fileName.split('/').pop()}</span>
-              {context.lineNumber && (
-                <span className="text-[10px] bg-secondary/50 px-1 rounded border border-border/20 shrink-0">
-                  L{context.lineNumber}
-                </span>
-              )}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
+                <FileCode className="w-3 h-3 text-primary shrink-0" />
+                <span className="truncate font-medium">{context.fileName.split("/").pop()}</span>
+                {context.lineNumber && (
+                  <span className="text-[10px] bg-secondary/50 px-1 rounded border border-border/20 shrink-0">
+                    L{context.lineNumber}
+                  </span>
+                )}
+                {context.selectedCode && (
+                  <span className="text-[10px] bg-primary/10 text-primary px-1 rounded border border-primary/20 shrink-0">
+                    {context.selectedCode.split("\n").length}L selected
+                  </span>
+                )}
+              </div>
             </div>
-            {context.backtestResults && (
+
+            <div className="flex flex-wrap items-center gap-1">
+              {context.backtestResults && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 hover:bg-primary/20 hover:text-primary"
+                  title="Attach Backtest Results"
+                  onClick={() => {
+                    const results = context.backtestResults!;
+                    const resultText = `\n\nBacktest Results for context:\n- Profit Total: ${results.profit_total.toFixed(2)}%\n- Win Rate: ${results.win_rate.toFixed(2)}%\n- Max Drawdown: ${results.max_drawdown.toFixed(2)}%\n- Total Trades: ${results.total_trades}${results.sharpe ? `\n- Sharpe Ratio: ${results.sharpe.toFixed(2)}` : ""}`;
+                    setInput((prev) => prev + resultText);
+                  }}
+                >
+                  <BarChart3 className="w-3 h-3" />
+                </Button>
+              )}
+
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[10px] hover:bg-primary/20 hover:text-primary"
+                title="When enabled, the chat will automatically ask the AI to interpret completed backtests."
+                onClick={() => setAutoExplain((v) => !v)}
+              >
+                Auto: {autoExplain ? "On" : "Off"}
+              </Button>
+
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-5 w-5 hover:bg-primary/20 hover:text-primary shrink-0 ml-1"
-                title="Attach Backtest Results to message"
+                className="h-6 w-6 hover:bg-primary/20 hover:text-primary"
+                title="Ask AI to add a TA indicator pack (RSI/EMA/MACD/BB/ATR/ADX/Volume)"
                 onClick={() => {
-                  const results = context.backtestResults!;
-                  const resultText = `\n\nBacktest Results for context:\n- Profit Total: ${results.profit_total.toFixed(2)}%\n- Win Rate: ${results.win_rate.toFixed(2)}%\n- Max Drawdown: ${results.max_drawdown.toFixed(2)}%\n- Total Trades: ${results.total_trades}${results.sharpe ? `\n- Sharpe Ratio: ${results.sharpe.toFixed(2)}` : ""}`;
-                  setInput(prev => prev + resultText);
+                  const text = [
+                    "Add a TA indicator pack to populate_indicators for this strategy:",
+                    "- RSI(14)",
+                    "- EMA(20), EMA(50)",
+                    "- MACD(12,26,9)",
+                    "- Bollinger Bands(20,2)",
+                    "- ATR(14)",
+                    "- ADX(14)",
+                    "- Volume SMA(20) and volume ratio",
+                    "Return the updated populate_indicators function only (keep function name).",
+                    "Do not change entry/exit rules unless asked.",
+                  ].join("\n");
+                  setInput((prev) => prev + (prev ? "\n\n" : "") + text);
                 }}
               >
-                <BarChart3 className="w-3 h-3" />
+                <Zap className="w-3 h-3" />
               </Button>
-            )}
-
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-5 px-2 text-[10px] hover:bg-primary/20 hover:text-primary shrink-0 ml-1"
-              title="When enabled, the chat will automatically ask the AI to interpret completed backtests."
-              onClick={() => setAutoExplain((v) => !v)}
-            >
-              Auto Explain: {autoExplain ? "On" : "Off"}
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-5 w-5 hover:bg-primary/20 hover:text-primary shrink-0 ml-1"
-              title="Ask AI to add a TA indicator pack (RSI/EMA/MACD/BB/ATR/ADX/Volume)"
-              onClick={() => {
-                const text = [
-                  "Add a TA indicator pack to populate_indicators for this strategy:",
-                  "- RSI(14)",
-                  "- EMA(20), EMA(50)",
-                  "- MACD(12,26,9)",
-                  "- Bollinger Bands(20,2)",
-                  "- ATR(14)",
-                  "- ADX(14)",
-                  "- Volume SMA(20) and volume ratio",
-                  "Return the updated populate_indicators function only (keep function name).",
-                  "Do not change entry/exit rules unless asked.",
-                ].join("\n");
-                setInput((prev) => prev + (prev ? "\n\n" : "") + text);
-              }}
-            >
-              <Zap className="w-3 h-3" />
-            </Button>
-          </div>
-            {context.selectedCode && (
-              <div className="flex items-center gap-1.5 text-[10px] text-primary bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10">
-                <Code className="w-2.5 h-2.5" />
-                <span>Selected: {context.selectedCode.split('\n').length} lines</span>
-              </div>
-            )}
+            </div>
           </div>
         </div>
       )}
@@ -1322,16 +1394,23 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                       const hasConfigPatch = patch != null && Object.keys(patch).length > 0;
                       const hasAction = Boolean(action);
                       const allowApplyToEditor = Boolean(onApplyCode) && !hasConfigPatch && !hasAction;
-                      const mismatchWarning = shouldWarnFunctionMismatch(context.selectedCode, cursorFunctionName, block);
-                      const snippetFn = inferPythonFunctionName(block.code);
+                      const mismatchWarningRaw = shouldWarnFunctionMismatch(context.selectedCode, cursorFunctionName, block);
+                      const snippetFn = inferSingleFunctionName(block.code);
                       const canReplaceEnclosing =
                         !hasSelection &&
                         Boolean(cursorFunctionName) &&
                         Boolean(snippetFn) &&
                         cursorFunctionName === snippetFn;
-                      const applyMode: "selection" | "cursor" | "enclosingFunction" = hasSelection
+                      const namedTarget = snippetFn ? inferPythonFunctionBlockByNameFromFile(context.fileContent, snippetFn) : null;
+                      const canReplaceByName =
+                        !hasSelection &&
+                        Boolean(snippetFn) &&
+                        Boolean(namedTarget?.code);
+
+                      const applyMode: "selection" | "cursor" | "enclosingFunction" | "namedFunction" = hasSelection
                         ? "selection"
-                        : (canReplaceEnclosing ? "enclosingFunction" : "cursor");
+                        : (canReplaceEnclosing ? "enclosingFunction" : (canReplaceByName ? "namedFunction" : "cursor"));
+                      const mismatchWarning = applyMode === "namedFunction" ? null : mismatchWarningRaw;
 
                       return (
                         <div key={idx} className="flex gap-2">
@@ -1402,17 +1481,25 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                 const currentLabel =
                                   applyMode === "selection"
                                     ? "Selected"
-                                    : (applyMode === "enclosingFunction" ? `Function '${cursorFunctionName ?? ""}'` : "Cursor Context");
+                                    : (applyMode === "enclosingFunction"
+                                      ? `Function '${cursorFunctionName ?? ""}'`
+                                      : (applyMode === "namedFunction"
+                                        ? `Function '${snippetFn ?? ""}'`
+                                        : "Cursor Context"));
                                 const current =
                                   applyMode === "selection"
                                     ? String(context.selectedCode || "")
                                     : (applyMode === "enclosingFunction"
                                       ? (enclosingFunctionBlock?.code ?? getCursorContextSnippet(context.fileContent, context.lineNumber))
-                                      : getCursorContextSnippet(context.fileContent, context.lineNumber));
+                                      : (applyMode === "namedFunction"
+                                        ? (namedTarget?.code ?? getCursorContextSnippet(context.fileContent, context.lineNumber))
+                                        : getCursorContextSnippet(context.fileContent, context.lineNumber)));
                                 const title =
                                   applyMode === "selection"
                                     ? "Preview: Replace Selection"
-                                    : (applyMode === "enclosingFunction" ? "Preview: Replace Current Function" : "Preview: Insert at Cursor");
+                                    : (applyMode === "enclosingFunction"
+                                      ? "Preview: Replace Current Function"
+                                      : (applyMode === "namedFunction" ? "Preview: Replace Function by Name" : "Preview: Insert at Cursor"));
 
                                 setPreview({
                                   title,
@@ -1438,6 +1525,9 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                   if (canReplaceEnclosing) {
                                     const ok = confirm(`Replace current function '${cursorFunctionName}' with this snippet?`);
                                     if (!ok) return;
+                                  } else if (canReplaceByName) {
+                                    const ok = confirm(`Replace function '${snippetFn}' (by name) with this snippet?`);
+                                    if (!ok) return;
                                   } else {
                                     const ok = confirm("No code is selected. Insert this snippet at the current cursor position?");
                                     if (!ok) return;
@@ -1452,7 +1542,13 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                               }}
                             >
                               <Code className="w-3 h-3" />
-                              {hasSelection ? "Replace Selection" : (canReplaceEnclosing ? "Replace Current Function" : "Insert at Cursor")}
+                              {hasSelection
+                                ? "Replace Selection"
+                                : (canReplaceEnclosing
+                                  ? "Replace Current Function"
+                                  : (canReplaceByName
+                                    ? `Replace Function '${snippetFn}'`
+                                    : "Insert at Cursor"))}
                             </Button>
                           )}
                           {allowApplyToEditor && canApplyAndSave && Boolean(onApplyAndSaveCode) && (
@@ -1464,6 +1560,9 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                 if (!hasSelection) {
                                   if (canReplaceEnclosing) {
                                     const ok = confirm(`Replace current function '${cursorFunctionName}' with this snippet?`);
+                                    if (!ok) return;
+                                  } else if (canReplaceByName) {
+                                    const ok = confirm(`Replace function '${snippetFn}' (by name) with this snippet?`);
                                     if (!ok) return;
                                   } else {
                                     const ok = confirm("No code is selected. Insert this snippet at the current cursor position?");

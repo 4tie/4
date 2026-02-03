@@ -17,6 +17,7 @@ export interface CodeEditorHandle {
   applyCode: (code: string) => void;
   getValue: () => string;
   replaceEnclosingFunction: (code: string) => boolean;
+  replaceFunctionByName: (fnName: string, code: string) => boolean;
 }
 
 interface CodeEditorProps {
@@ -38,6 +39,13 @@ const leadingIndent = (line: string) => {
 const isPythonDefLine = (line: string) => /^\s*def\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(String(line || ""));
 const isPythonDecoratorLine = (line: string) => /^\s*@/.test(String(line || ""));
 const isPythonClassLine = (line: string) => /^\s*class\s+[A-Za-z_][A-Za-z0-9_]*\s*[(:]/.test(String(line || ""));
+
+const isPythonDefForName = (line: string, fnName: string) => {
+  const name = String(fnName || "").trim();
+  if (!name) return false;
+  const re = new RegExp(`^\\s*def\\s+${name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\s*\\(`);
+  return re.test(String(line || ""));
+};
 
 const findEnclosingPythonFunctionRange = (model: editor.ITextModel, lineNumber: number): IRange | null => {
   const total = model.getLineCount();
@@ -93,6 +101,54 @@ const findEnclosingPythonFunctionRange = (model: editor.ITextModel, lineNumber: 
   }
 
   return null;
+};
+
+const findPythonFunctionRangeByName = (model: editor.ITextModel, fnName: string): IRange | null => {
+  const total = model.getLineCount();
+  const name = String(fnName || "").trim();
+  if (!name) return null;
+
+  let defLine = -1;
+  for (let i = 1; i <= total; i++) {
+    const line = model.getLineContent(i);
+    if (isPythonDefForName(line, name)) {
+      defLine = i;
+      break;
+    }
+  }
+  if (defLine === -1) return null;
+
+  const defIndent = leadingIndent(model.getLineContent(defLine));
+  let startLine = defLine;
+  while (startLine > 1) {
+    const prev = model.getLineContent(startLine - 1);
+    if (!isPythonDecoratorLine(prev)) break;
+    if (leadingIndent(prev) !== defIndent) break;
+    startLine--;
+  }
+
+  let endLine = total;
+  for (let i = defLine + 1; i <= total; i++) {
+    const line = model.getLineContent(i);
+    if (!String(line).trim()) continue;
+
+    const ind = leadingIndent(line);
+    if (ind < defIndent) {
+      endLine = i - 1;
+      break;
+    }
+    if (ind === defIndent && (isPythonDefLine(line) || isPythonDecoratorLine(line) || isPythonClassLine(line))) {
+      endLine = i - 1;
+      break;
+    }
+  }
+
+  return {
+    startLineNumber: startLine,
+    startColumn: 1,
+    endLineNumber: Math.max(startLine, endLine),
+    endColumn: model.getLineMaxColumn(Math.max(startLine, endLine)),
+  };
 };
 
 export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(({ language, value, onChange, onSave, onEditorStateChange, readOnly = false, onToggleChat, isChatOpen }, ref) => {
@@ -200,6 +256,28 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(({ langu
     applyCode,
     getValue: () => editorRef.current?.getValue() ?? value,
     replaceEnclosingFunction,
+    replaceFunctionByName: (fnName: string, code: string): boolean => {
+      if (!editorRef.current) return false;
+      const model = editorRef.current.getModel();
+      if (!model) return false;
+
+      const range = findPythonFunctionRangeByName(model, fnName);
+      if (!range) return false;
+
+      editorRef.current.executeEdits("ai-suggestion", [
+        {
+          range,
+          text: code,
+          forceMoveMarkers: true,
+        },
+      ]);
+      setIsDirty(true);
+      toast({
+        title: "AI Suggestion Applied",
+        description: `Replaced function '${fnName}'.`,
+      });
+      return true;
+    },
   }));
 
   const handleEditorMount = useCallback((editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {

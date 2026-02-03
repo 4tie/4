@@ -386,34 +386,57 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createAiAction(action: InsertAiAction): Promise<AiAction> {
-    const [inserted] = await db.insert(aiActions).values(action).returning();
-    return inserted;
+    try {
+      const [inserted] = await db.insert(aiActions).values(action).returning();
+      return inserted;
+    } catch (err: any) {
+      // If migrations haven't been applied yet, avoid crashing the whole request path.
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_actions table is missing. Apply migrations (db:push) and retry.");
+      }
+      throw err;
+    }
   }
 
   async getAiActions(sessionId?: number, backtestId?: number): Promise<AiAction[]> {
-    if (sessionId && backtestId) {
-      return await db
-        .select()
-        .from(aiActions)
-        .where(and(eq(aiActions.sessionId, sessionId), eq(aiActions.backtestId, backtestId)))
-        .orderBy(desc(aiActions.createdAt));
+    try {
+      if (sessionId && backtestId) {
+        return await db
+          .select()
+          .from(aiActions)
+          .where(and(eq(aiActions.sessionId, sessionId), eq(aiActions.backtestId, backtestId)))
+          .orderBy(desc(aiActions.createdAt));
+      }
+      if (sessionId) {
+        return await db.select().from(aiActions).where(eq(aiActions.sessionId, sessionId)).orderBy(desc(aiActions.createdAt));
+      }
+      if (backtestId) {
+        return await db.select().from(aiActions).where(eq(aiActions.backtestId, backtestId)).orderBy(desc(aiActions.createdAt));
+      }
+      return await db.select().from(aiActions).orderBy(desc(aiActions.createdAt));
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return [];
+      throw err;
     }
-    if (sessionId) {
-      return await db.select().from(aiActions).where(eq(aiActions.sessionId, sessionId)).orderBy(desc(aiActions.createdAt));
-    }
-    if (backtestId) {
-      return await db.select().from(aiActions).where(eq(aiActions.backtestId, backtestId)).orderBy(desc(aiActions.createdAt));
-    }
-    return await db.select().from(aiActions).orderBy(desc(aiActions.createdAt));
   }
 
   async getAiAction(id: number): Promise<AiAction | undefined> {
-    const [action] = await db.select().from(aiActions).where(eq(aiActions.id, id));
-    return action;
+    try {
+      const [action] = await db.select().from(aiActions).where(eq(aiActions.id, id));
+      return action;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return undefined;
+      throw err;
+    }
   }
 
   async getAiActionsForBacktest(backtestId: number): Promise<AiAction[]> {
-    return await db.select().from(aiActions).where(eq(aiActions.backtestId, backtestId)).orderBy(desc(aiActions.createdAt));
+    try {
+      return await db.select().from(aiActions).where(eq(aiActions.backtestId, backtestId)).orderBy(desc(aiActions.createdAt));
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return [];
+      throw err;
+    }
   }
 
   async createAgentHandoff(handoff: InsertAgentHandoff): Promise<AgentHandoff> {
@@ -422,8 +445,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAgentHandoffByRunId(runId: string): Promise<AgentHandoff | undefined> {
-    const [handoff] = await db.select().from(agentHandoffs).where(eq(agentHandoffs.runId, runId));
-    return handoff;
+    try {
+      const [handoff] = await db.select().from(agentHandoffs).where(eq(agentHandoffs.runId, runId));
+      return handoff;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return undefined;
+      throw err;
+    }
   }
 }
 
