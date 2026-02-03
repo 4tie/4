@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { sql } from "drizzle-orm";
+import { and, eq, desc, asc, gt, sql } from "drizzle-orm";
 import {
   files as filesTable, backtests, diagnosticReports,
   diagnosticJobs,
@@ -14,15 +14,6 @@ import {
   type AiChatMessage, type InsertAiChatMessage,
   type AiAuditEvent, type InsertAiAuditEvent
 } from "@shared/schema";
-<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
-<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
-import { eq, desc, asc, gt } from "drizzle-orm";
-=======
-import { and, eq, desc, asc, gt } from "drizzle-orm";
->>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
-=======
-import { and, eq, desc, asc, gt } from "drizzle-orm";
->>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
@@ -360,30 +351,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAiChatMessages(sessionId: number, since?: Date | null): Promise<AiChatMessage[]> {
-<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
-<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
-    const base = db.select().from(aiChatMessages).where(eq(aiChatMessages.sessionId, sessionId));
-    if (since) {
-      return await base.where(gt(aiChatMessages.createdAt, since as any)).orderBy(asc(aiChatMessages.createdAt));
-    }
-    return await base.orderBy(asc(aiChatMessages.createdAt));
-=======
-=======
->>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
-    const where = since
-      ? and(eq(aiChatMessages.sessionId, sessionId), gt(aiChatMessages.createdAt, since as any))
-      : eq(aiChatMessages.sessionId, sessionId);
+  const whereClause = since
+    ? and(eq(aiChatMessages.sessionId, sessionId), gt(aiChatMessages.createdAt, since as any))
+    : eq(aiChatMessages.sessionId, sessionId);
 
-    return await db
-      .select()
-      .from(aiChatMessages)
-      .where(where)
-      .orderBy(asc(aiChatMessages.createdAt));
-<<<<<<< /home/mohs/Desktop/re/we/server/storage.ts
->>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
-=======
->>>>>>> /home/mohs/.windsurf/worktrees/we/we-66ad969b/server/storage.ts
-  }
+  return await db
+    .select()
+    .from(aiChatMessages)
+    .where(whereClause)
+    .orderBy(asc(aiChatMessages.createdAt));
+}
 
   async createAiAuditEvent(event: InsertAiAuditEvent): Promise<AiAuditEvent> {
     const [inserted] = await db.insert(aiAuditEvents).values(event).returning();
