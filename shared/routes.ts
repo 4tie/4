@@ -32,6 +32,14 @@ export const api = {
         200: z.array(z.custom<typeof files.$inferSelect>()),
       },
     },
+    getByPath: {
+      method: 'GET' as const,
+      path: '/api/files/by-path',
+      responses: {
+        200: z.custom<typeof files.$inferSelect>(),
+        404: errorSchemas.notFound,
+      },
+    },
     get: {
       method: 'GET' as const,
       path: '/api/files/:id',

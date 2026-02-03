@@ -975,8 +975,8 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
         model: selectedModel,
         context: {
           fileName: context.fileName,
-          fileContent: context.fileContent,
-          selectedCode: context.selectedCode,
+          fileContent: typeof context.fileContent === "string" ? context.fileContent.slice(0, 22000) : context.fileContent,
+          selectedCode: typeof context.selectedCode === "string" ? context.selectedCode.slice(0, 6000) : context.selectedCode,
           lineNumber: context.lineNumber,
           cursorFunctionName: cursorFunctionNameForRequest,
           lastBacktest: context.lastBacktest,
@@ -1174,14 +1174,13 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     }
   };
 
-  if (!isOpen) {
-    return null;
-  }
-
   return (
     <div 
       data-testid="panel-chat"
-      className="h-full w-[320px] bg-card border-l border-border/50 flex flex-col overflow-hidden transition-all duration-300 ease-in-out animate-in slide-in-from-right-4"
+      className={cn(
+        "h-full w-full bg-card border-l border-border/50 flex flex-col overflow-hidden",
+        !isOpen && "pointer-events-none opacity-0",
+      )}
     >
       <div className="flex items-center justify-between gap-2 p-3 border-b border-border/50 bg-background">
         <div className="flex items-center gap-2">

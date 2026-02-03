@@ -18,6 +18,8 @@ import { Button } from "@/components/ui/button";
 import { Save, Play, Loader2, MessageSquare, Layout, Activity, BarChart3, Cpu, Zap, Wifi, WifiOff, FileCode, Scale, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import type { ImperativePanelHandle } from "react-resizable-panels";
+import { api } from "@shared/routes";
 
 type ViewMode = "ide" | "backtest" | "results" | "comparison" | "diagnostics";
 
@@ -38,6 +40,20 @@ export default function Home() {
     "diagnosticsPlacement",
     "header",
   );
+  const chatPanelRef = useRef<ImperativePanelHandle>(null);
+
+  const setChatOpenAndResize = useCallback((next: boolean) => {
+    setChatOpen(next);
+    // Collapse/expand the resizable panel so it actually frees up space.
+    if (next) chatPanelRef.current?.expand();
+    else chatPanelRef.current?.collapse();
+  }, []);
+
+  useEffect(() => {
+    // Ensure chat is actually collapsed by default (PanelGroup default sizes may otherwise allocate space).
+    if (!chatOpen) chatPanelRef.current?.collapse();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   
   const { data: backtests } = useBacktests();
   const backtestById = (id: number | null) => {
@@ -124,6 +140,29 @@ export default function Home() {
   // Local state for editor content to handle unsaved changes
   const [editorContent, setEditorContent] = useState("");
   const [isDirty, setIsDirty] = useState(false);
+
+  const chatFilePath = (() => {
+    if (activeFilePath) return activeFilePath;
+    if (displayedResultsBacktest?.strategyName) return String(displayedResultsBacktest.strategyName);
+    if (selectedStrategyName) return String(selectedStrategyName);
+    return null;
+  })();
+
+  const { data: chatFileFromDb } = useQuery({
+    queryKey: [api.files.getByPath.path, chatFilePath],
+    enabled: Boolean(chatOpen && chatFilePath && String(chatFilePath).startsWith("user_data/strategies/")),
+    queryFn: async () => {
+      if (!chatFilePath) return null;
+      const res = await fetch(`${api.files.getByPath.path}?path=${encodeURIComponent(chatFilePath)}`, { credentials: "include" });
+      if (!res.ok) return null;
+      return res.json();
+    },
+  });
+
+  const chatFileContent =
+    activeFilePath && chatFilePath === activeFilePath
+      ? editorContent
+      : (typeof (chatFileFromDb as any)?.content === "string" ? String((chatFileFromDb as any).content) : "");
 
   useEffect(() => {
     if (activeFile) {
@@ -269,14 +308,14 @@ export default function Home() {
                   "h-8 px-3 text-xs gap-2 transition-all duration-200",
                   viewMode === "diagnostics" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
                 )}
-                onClick={() => {
-                  setViewMode("diagnostics");
-                  setShowBacktestDashboard(false);
-                }}
-              >
-                <Activity className="w-3.5 h-3.5" />
-                Diagnostics
-              </Button>
+                    onClick={() => {
+                      setViewMode("diagnostics");
+                      setShowBacktestDashboard(false);
+                    }}
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    Diagnostics
+                  </Button>
             )}
           </nav>
         </div>
@@ -332,23 +371,22 @@ export default function Home() {
             </div>
           </div>
 
-          <ChatToggleButton isOpen={chatOpen} onToggle={() => setChatOpen(!chatOpen)} />
+          <ChatToggleButton isOpen={chatOpen} onToggle={() => setChatOpenAndResize(!chatOpen)} />
         </div>
       </header>
       
-      <ResizablePanelGroup direction="horizontal" className="flex-1">
-        
+      <div className="flex-1 flex overflow-hidden">
         {/* LEFT SIDEBAR - DOCKABLE */}
-        <div 
+        <div
           className={cn(
             "transition-all duration-300 ease-in-out overflow-hidden border-r border-border/50",
-            sidebarOpen ? "w-[280px] opacity-100" : "w-0 opacity-0"
+            sidebarOpen ? "w-[280px] opacity-100" : "w-0 opacity-0",
           )}
         >
           {sidebarOpen && (
             <div className="h-full bg-sidebar flex flex-col">
-              <Sidebar 
-                activeTab={activeSidebarTab} 
+              <Sidebar
+                activeTab={activeSidebarTab}
                 setActiveTab={setActiveSidebarTab}
                 onFileSelect={handleFileSelect}
                 onBacktestSelect={handleBacktestSelect}
@@ -372,10 +410,11 @@ export default function Home() {
             </div>
           )}
         </div>
-        
-        {/* MAIN CONTENT AREA */}
-        <ResizablePanel defaultSize={100} className="transition-all duration-300 ease-in-out">
-          <ResizablePanelGroup direction="vertical" className="h-full">
+
+        {/* MAIN + CHAT (RESIZABLE) */}
+        <ResizablePanelGroup direction="horizontal" className="flex-1" autoSaveId="layout:home-main-chat">
+          <ResizablePanel defaultSize={chatOpen ? 65 : 100} minSize={30} className="transition-all duration-300 ease-in-out">
+            <ResizablePanelGroup direction="vertical" className="h-full">
             
             {/* EDITOR / DASHBOARD AREA */}
             <ResizablePanel defaultSize={70} minSize={30}>
@@ -542,7 +581,7 @@ export default function Home() {
                     selectedStrategyName={selectedStrategyName}
                     placement={diagnosticsPlacement}
                     onPlacementChange={setDiagnosticsPlacement}
-                    onOpenChat={() => setChatOpen(true)}
+                    onOpenChat={() => setChatOpenAndResize(true)}
                   />
                 ) : (
                   <div className="h-full flex flex-col">
@@ -589,39 +628,45 @@ export default function Home() {
               <TerminalPanel logs={terminalLogs} onCommand={(log) => setTerminalLogs(prev => [...prev, log])} />
             </ResizablePanel>
             
-          </ResizablePanelGroup>
-        </ResizablePanel>
-        
-        {/* RIGHT CHAT PANEL - DOCKABLE */}
-        <div 
-          className={cn(
-            "transition-all duration-300 ease-in-out overflow-hidden border-l border-border/50",
-            chatOpen ? "w-[320px] opacity-100" : "w-0 opacity-0"
-          )}
-        >
-          {chatOpen && (
-            <ChatPanel
+            </ResizablePanelGroup>
+          </ResizablePanel>
+
+          <ResizableHandle withHandle className={cn(!chatOpen && "hidden")} />
+
+          <ResizablePanel
+            ref={chatPanelRef}
+            defaultSize={35}
+            minSize={22}
+            collapsible
+            collapsedSize={0}
+            className="min-w-0"
+          >
+              <ChatPanel
               isOpen={chatOpen}
-              onToggle={() => setChatOpen(!chatOpen)}
+              onToggle={() => setChatOpenAndResize(!chatOpen)}
               context={{
-                fileName: activeFile?.path,
-                fileContent: editorContent,
-                selectedCode: editorState.selectedCode,
-                lineNumber: editorState.lineNumber,
-                lastBacktest: displayedResultsBacktest ? {
-                  id: displayedResultsBacktest.id,
-                  strategyName: displayedResultsBacktest.strategyName,
-                  // @ts-ignore
-                  config: displayedResultsBacktest.config,
-                } : undefined,
-                backtestResults: displayedResultsBacktest?.results ? {
-                  profit_total: parseFloat((displayedResultsBacktest.results as any).profit_total) * 100,
-                  win_rate: parseFloat((displayedResultsBacktest.results as any).win_rate) * 100,
-                  max_drawdown: parseFloat((displayedResultsBacktest.results as any).max_drawdown) * 100,
-                  total_trades: (displayedResultsBacktest.results as any).total_trades,
-                  avg_profit: (displayedResultsBacktest.results as any).avg_profit_per_trade,
-                  sharpe: (displayedResultsBacktest.results as any).sharpe_ratio,
-                } : undefined,
+                fileName: chatFilePath ?? undefined,
+                fileContent: chatFileContent,
+                selectedCode: (activeFilePath && chatFilePath === activeFilePath) ? editorState.selectedCode : "",
+                lineNumber: (activeFilePath && chatFilePath === activeFilePath) ? editorState.lineNumber : undefined,
+                lastBacktest: displayedResultsBacktest
+                  ? {
+                      id: displayedResultsBacktest.id,
+                      strategyName: displayedResultsBacktest.strategyName,
+                      // @ts-ignore
+                      config: displayedResultsBacktest.config,
+                    }
+                  : undefined,
+                backtestResults: displayedResultsBacktest?.results
+                  ? {
+                      profit_total: parseFloat((displayedResultsBacktest.results as any).profit_total) * 100,
+                      win_rate: parseFloat((displayedResultsBacktest.results as any).win_rate) * 100,
+                      max_drawdown: parseFloat((displayedResultsBacktest.results as any).max_drawdown) * 100,
+                      total_trades: (displayedResultsBacktest.results as any).total_trades,
+                      avg_profit: (displayedResultsBacktest.results as any).avg_profit_per_trade,
+                      sharpe: (displayedResultsBacktest.results as any).sharpe_ratio,
+                    }
+                  : undefined,
               }}
               onApplyCode={(code, mode) => {
                 const inferFnName = (src: string): string | null => {
@@ -749,8 +794,8 @@ export default function Home() {
                 });
               }}
             />
-          )}
-        </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
         
         {chatSystemMessage && (
           <div className="fixed bottom-20 right-8 z-50">
@@ -760,8 +805,8 @@ export default function Home() {
             </div>
           </div>
         )}
-        
-      </ResizablePanelGroup>
+
+      </div>
     </div>
   );
 }

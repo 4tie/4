@@ -33,10 +33,10 @@ class MultiMa(IStrategy):
 
     # ROI table:
     minimal_roi = {
-        "0": 0.523,
-        "1553": 0.123,
-        "2332": 0.076,
-        "3169": 0
+        "0": 0.08,
+        "30": 0.04,
+        "60": 0.02,
+        "120": 0,
     }
 
     # Stoploss:
@@ -54,56 +54,72 @@ class MultiMa(IStrategy):
     count_max = 20
     gap_max = 100
 
-    buy_ma_count = IntParameter(1, count_max, default=7, space="buy")
-    buy_ma_gap = IntParameter(1, gap_max, default=7, space="buy")
+    buy_ma_count = IntParameter(1, count_max, default= 7, space="buy")
+    buy_ma_gap = IntParameter(1, gap_max, default= 7, space="buy")
 
-    sell_ma_count = IntParameter(1, count_max, default=7, space="sell")
-    sell_ma_gap = IntParameter(1, gap_max, default=94, space="sell")
+    sell_ma_count = IntParameter(1, count_max, default= 7, space="sell")
+    sell_ma_gap = IntParameter(1, gap_max, default= 94, space="sell")
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        periods = set()
-        for ma_count in range(1, int(self.buy_ma_count.value)):
-            periods.add(ma_count * int(self.buy_ma_gap.value))
-        for ma_count in range(1, int(self.sell_ma_count.value)):
-            periods.add(ma_count * int(self.sell_ma_gap.value))
-
-        periods = sorted([p for p in periods if p > 1])
-
+        # Pre-compute all possible MAs to avoid look-ahead bias
+        max_periods = self.count_max * self.gap_max
+        
         new_cols = {}
-        for p in periods:
+        for p in range(2, max_periods + 1):
             if p not in dataframe.columns:
-                new_cols[p] = ta.TEMA(dataframe, timeperiod=int(p))
-
+                new_cols[p] = ta.TEMA(dataframe, timeperiod=p)
+        
         if new_cols:
             dataframe = pd.concat([dataframe, pd.DataFrame(new_cols)], axis=1)
-        print(" ", metadata['pair'], end="\t\r")
-
+        
+        # Add volatility filter
+        dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
+        dataframe['volatility_regime'] = (dataframe['atr'] / dataframe['close']).rolling(50).mean()
+        
+        # Add trend filter
+        dataframe['ema_200'] = ta.EMA(dataframe, timeperiod=200)
+        dataframe['price_position'] = dataframe['close'] / dataframe['ema_200']
+        
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         conditions = []
-        # I used range(self.buy_ma_count.value) instade of self.buy_ma_count.range
-        # Cuz it returns range(7,8) but we need range(8) for all modes hyperopt, backtest and etc
-
-        for ma_count in range(self.buy_ma_count.value):
-            key = ma_count*self.buy_ma_gap.value
-            past_key = (ma_count-1)*self.buy_ma_gap.value
-            if past_key > 1 and key in dataframe.keys() and past_key in dataframe.keys():
-                conditions.append(dataframe[key] < dataframe[past_key])
-
-        if conditions:
-            dataframe.loc[reduce(lambda x, y: x & y, conditions), "enter_long"] = 1
+        
+        # Only enter in favorable volatility regime
+        volatility_condition = dataframe['volatility_regime'] < dataframe['volatility_regime'].rolling(100).quantile(0.8)
+        
+        # Only enter in uptrend
+        trend_condition = dataframe['price_position'] > 1.0
+        
+        ma_conditions = []
+        for ma_count in range(1, self.buy_ma_count.value + 1):  # Fixed range
+            key = ma_count * self.buy_ma_gap.value
+            past_key = (ma_count - 1) * self.buy_ma_gap.value
+            if past_key > 1 and key in dataframe.columns and past_key in dataframe.columns:
+                ma_conditions.append(dataframe[key] < dataframe[past_key])
+        
+        if ma_conditions:
+            ma_condition = reduce(lambda x, y: x & y, ma_conditions)
+            dataframe.loc[volatility_condition & trend_condition & ma_condition, "enter_long"] = 1
+        
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         conditions = []
-
-        for ma_count in range(self.sell_ma_count.value):
-            key = ma_count*self.sell_ma_gap.value
-            past_key = (ma_count-1)*self.sell_ma_gap.value
-            if past_key > 1 and key in dataframe.keys() and past_key in dataframe.keys():
+        
+        # Exit conditions - more robust than simple OR
+        for ma_count in range(1, self.sell_ma_count.value + 1):  # Fixed range
+            key = ma_count * self.sell_ma_gap.value
+            past_key = (ma_count - 1) * self.sell_ma_gap.value
+            if past_key > 1 and key in dataframe.columns and past_key in dataframe.columns:
                 conditions.append(dataframe[key] > dataframe[past_key])
-
+        
+        # Add stoploss exit
+        stoploss_condition = (dataframe['close'] < dataframe['close'].shift(1) * (1 + self.stoploss))
+        
         if conditions:
-            dataframe.loc[reduce(lambda x, y: x | y, conditions), "exit_long"] = 1
+            ma_exit = reduce(lambda x, y: x | y, conditions)
+            # Exit on either technical signal OR stoploss
+            dataframe.loc[ma_exit | stoploss_condition, "exit_long"] = 1
+        
         return dataframe

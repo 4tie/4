@@ -270,6 +270,22 @@ function buildTimerange(from?: string, to?: string) {
   return (fromPart || toPart) ? `${fromPart}-${toPart}` : "";
 }
 
+function clampText(value: unknown, maxChars: number): string {
+  const s = typeof value === "string" ? value : value == null ? "" : String(value);
+  if (s.length <= maxChars) return s;
+  return `${s.slice(0, maxChars)}\n\n[...truncated ${s.length - maxChars} chars...]`;
+}
+
+function fileWindowByLine(content: string, lineNumber: number | undefined, radiusLines: number): string {
+  const lines = String(content || "").split(/\r?\n/);
+  if (lines.length === 0) return "";
+  const target = Math.min(Math.max(1, Number(lineNumber || 1)), lines.length);
+  const start = Math.max(1, target - radiusLines);
+  const end = Math.min(lines.length, target + radiusLines);
+  const snippet = lines.slice(start - 1, end).join("\n");
+  return `# File window: lines ${start}-${end} (cursor at ${target})\n${snippet}`;
+}
+
 function applyBacktestOverridesToConfig(baseConfig: any, runInput: any) {
   const next = baseConfig && typeof baseConfig === "object" ? JSON.parse(JSON.stringify(baseConfig)) : {};
   const cfg = runInput?.config && typeof runInput.config === "object" ? runInput.config : {};
@@ -483,6 +499,14 @@ export async function registerRoutes(
   app.get(api.files.list.path, async (req, res) => {
     const files = await storage.getFiles();
     res.json(files);
+  });
+
+  app.get(api.files.getByPath.path, async (req, res) => {
+    const p = typeof req.query.path === "string" ? String(req.query.path) : "";
+    if (!p) return res.status(400).json({ message: "Missing path" });
+    const file = await storage.getFileByPath(p);
+    if (!file) return res.status(404).json({ message: "File not found" });
+    res.json(file);
   });
 
   // Sync files from filesystem
@@ -988,6 +1012,7 @@ When Providing Code:
       systemPrompt += `\n\nExecutable Actions (Optional):\n- If the user asks you to RUN a backtest, validate over different time ranges, or do a multi-range check, you MAY output a single \`\`\`action code block containing JSON with this shape:\n\`\`\`action\n{\n  "action": "run_backtest" | "run_batch_backtest",\n  "payload": { ... }\n}\n\`\`\`\n- For action \"run_backtest\", payload may include:\n  - strategyName (optional)\n  - config: { timeframe, stake_amount, backtest_date_from, backtest_date_to, timerange, pairs, max_open_trades, tradable_balance_ratio, ... }\n- For action \"run_batch_backtest\", payload may include:\n  - strategyName (optional)\n  - baseConfig: { timeframe, stake_amount, pairs, max_open_trades, tradable_balance_ratio, ... }\n  - ranges: [{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}, ...] OR rolling: {"windowDays":90,"stepDays":90,"count":4,"end":"YYYY-MM-DD"}\n- If the user asks for \"validate across time ranges\" but does NOT specify the ranges, default to a rolling plan of 4 windows of 90 days ending today.`;
 
       systemPrompt += `\n\nTargeted Edits:\n- If the user has selected code, assume they want a targeted replacement. Return a single \`\`\`python code block containing ONLY the updated replacement snippet for the selected block (typically one function), and keep the same function name unless the user explicitly asks to rename it.\n- If the user has NOT selected code but the cursor is inside a function (cursorFunctionName is provided), prefer modifying that function and return ONLY that function definition as a single \`\`\`python code block.`;
+      systemPrompt += `\n\nValidation Requirement:\n- Before you propose a code change, confirm that the function/class/attribute you are changing EXISTS in the provided file content.\n- If it does NOT exist, ask the user to open the correct strategy file and do NOT guess.\n- Prefer returning a single existing function (by name) rather than introducing new ones unless explicitly requested.`;
       
       if (context) {
         if (context.fileName) {
@@ -1000,10 +1025,16 @@ When Providing Code:
           systemPrompt += `\nCursor is inside function: ${(context as any).cursorFunctionName}`;
         }
         if (context.selectedCode) {
-          systemPrompt += `\n\nUser has selected this code (lines starting around ${context.lineNumber || 'unknown'}):\n\`\`\`\n${context.selectedCode}\n\`\`\``;
+          const selected = clampText(context.selectedCode, 6000);
+          systemPrompt += `\n\nUser has selected this code (lines starting around ${context.lineNumber || 'unknown'}):\n\`\`\`\n${selected}\n\`\`\``;
         }
         if (context.fileContent) {
-          systemPrompt += `\n\nFull file content for reference:\n\`\`\`\n${context.fileContent}\n\`\`\``;
+          const raw = String(context.fileContent);
+          const safe =
+            raw.length > 20000
+              ? fileWindowByLine(raw, context.lineNumber, 160)
+              : raw;
+          systemPrompt += `\n\nFile content for reference:\n\`\`\`\n${clampText(safe, 22000)}\n\`\`\``;
         }
         if ((context as any).lastBacktest) {
           const lb = (context as any).lastBacktest as any;
@@ -1040,7 +1071,7 @@ Reason about these metrics. For example:
 Use the "Apply" button feature to help the user.
 If the user asks to "Explain this", "Optimize this", or "Why is this not working", focus your analysis on the provided selection or the full file context.`;
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
+      const upstreamRes = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -1057,13 +1088,18 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        console.error("OpenRouter error:", error);
-        return res.status(500).json({ message: "Failed to get AI response" });
+      if (!upstreamRes.ok) {
+        const errorText = await upstreamRes.text();
+        const trimmed = clampText(errorText, 1500);
+        console.error("OpenRouter error:", trimmed);
+        return res.status(502).json({
+          message: "Failed to get AI response",
+          upstreamStatus: upstreamRes.status,
+          details: trimmed,
+        });
       }
 
-      const data = await response.json() as { choices: Array<{ message: { content: string } }> };
+      const data = await upstreamRes.json() as { choices: Array<{ message: { content: string } }> };
       const aiResponse = data.choices?.[0]?.message?.content || "No response generated";
 
       res.json({ response: aiResponse });
