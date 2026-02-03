@@ -247,6 +247,30 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
   const avgProfit = winners.length > 0 ? winners.reduce((sum, t) => sum + t._profitRatio, 0) / winners.length : 0;
   const avgLoss = losers.length > 0 ? losers.reduce((sum, t) => sum + t._profitRatio, 0) / losers.length : 0;
   const profitFactor = Math.abs(avgLoss) > 0 ? (avgProfit * winners.length) / (Math.abs(avgLoss) * losers.length) : winners.length > 0 ? Infinity : 0;
+  const expectancy = computedTrades.length > 0
+    ? computedTrades.reduce((sum, t) => sum + t._profitRatio, 0) / computedTrades.length
+    : 0;
+  const winLossRatio = Math.abs(avgLoss) > 0 ? avgProfit / Math.abs(avgLoss) : 0;
+  const avgTradeDurationMin =
+    computedTrades.length > 0
+      ? computedTrades.reduce((sum, t) => sum + t._durationMs, 0) / computedTrades.length / 60000
+      : 0;
+  const tradesPerDay = (() => {
+    if (computedTrades.length === 0) return 0;
+    const times: number[] = [];
+    for (const t of computedTrades) {
+      const open = t.open_date ? new Date(t.open_date).getTime() : NaN;
+      const close = t.close_date ? new Date(t.close_date).getTime() : NaN;
+      if (Number.isFinite(open)) times.push(open);
+      if (Number.isFinite(close)) times.push(close);
+    }
+    if (!times.length) return 0;
+    const minTs = Math.min(...times);
+    const maxTs = Math.max(...times);
+    const spanDays = (maxTs - minTs) / (1000 * 60 * 60 * 24);
+    if (!Number.isFinite(spanDays) || spanDays <= 0) return 0;
+    return computedTrades.length / spanDays;
+  })();
 
   const insightItems = useMemo(() => {
     const items: Array<{ tone: "good" | "warn" | "bad"; text: string }> = [];
@@ -930,8 +954,9 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
             </CardContent>
           </Card>
         ) : activeTab === "analysis" ? (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <Card>
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <Card>
               <CardHeader>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
                   <Target className="w-4 h-4 text-blue-500" />
@@ -958,9 +983,9 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
                   </ResponsiveContainer>
                 </div>
               </CardContent>
-            </Card>
+              </Card>
 
-            <Card>
+              <Card>
               <CardHeader>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
                   <Info className="w-4 h-4 text-primary" />
@@ -984,6 +1009,52 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
                     Strategy expectancy is <strong>{profitFactor.toFixed(2)}</strong>. 
                     {profitFactor > 1.2 ? " This is a robust risk-reward profile." : " Consider widening profit targets or tightening stops."}
                   </p>
+                </div>
+              </CardContent>
+              </Card>
+            </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-primary" />
+                  Derived Metrics
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Expectancy</div>
+                    <div className="text-sm font-semibold">{(expectancy * 100).toFixed(3)}%</div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Profit Factor</div>
+                    <div className="text-sm font-semibold">{profitFactor.toFixed(2)}</div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Win/Loss Ratio</div>
+                    <div className="text-sm font-semibold">{winLossRatio.toFixed(2)}</div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Avg Win</div>
+                    <div className="text-sm font-semibold text-green-500">+{(avgProfit * 100).toFixed(2)}%</div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Avg Loss</div>
+                    <div className="text-sm font-semibold text-red-500">{(avgLoss * 100).toFixed(2)}%</div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Avg Duration</div>
+                    <div className="text-sm font-semibold">{avgTradeDurationMin ? `${avgTradeDurationMin.toFixed(1)} min` : "N/A"}</div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Trades/Day</div>
+                    <div className="text-sm font-semibold">{tradesPerDay ? tradesPerDay.toFixed(2) : "N/A"}</div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-muted/50 border border-border/50">
+                    <div className="text-[10px] text-muted-foreground uppercase font-bold mb-1">Winners/Losers</div>
+                    <div className="text-sm font-semibold">{winners.length}/{losers.length}</div>
+                  </div>
                 </div>
               </CardContent>
             </Card>

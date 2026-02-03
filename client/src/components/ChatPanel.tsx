@@ -6,7 +6,7 @@ import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, Panel
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
-import { useAIStore } from "@/hooks/use-ai";
+import { useResolvedAIModel } from "@/hooks/use-ai";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, buildUrl } from "@shared/routes";
 import { AIActionTimeline } from "@/components/ai/AIActionTimeline";
@@ -118,6 +118,7 @@ type ExtractedBlock = {
 type ParsedAction =
   | { action: "run_backtest"; payload: any }
   | { action: "run_batch_backtest"; payload: any }
+  | { action: "run_diagnostic"; payload: any }
   | { action: string; payload: any };
 
 const parseActionBlock = (block: ExtractedBlock): ParsedAction | null => {
@@ -147,6 +148,44 @@ const extractCodeBlocks = (content: string): ExtractedBlock[] => {
     });
   }
   return blocks;
+};
+
+const parseChoiceBlocks = (content: string): Array<{ label: string; value: string }> => {
+  const text = String(content || "");
+  const idx = text.toLowerCase().indexOf("choices:");
+  if (idx === -1) return [];
+  const after = text.slice(idx + "choices:".length);
+  const lines = after.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const out: Array<{ label: string; value: string }> = [];
+  for (const line of lines) {
+    const m = line.match(/^(\d+)\)\s+(.*)$/);
+    if (!m) {
+      // Stop once we leave the numbered block
+      if (out.length > 0) break;
+      continue;
+    }
+    const n = m[1];
+    const value = String(m[2] || "").trim();
+    if (!value) continue;
+    out.push({ label: n, value });
+    if (out.length >= 4) break;
+  }
+  return out.length >= 2 ? out : [];
+};
+
+const isLikelyEditablePythonSuggestion = (block: ExtractedBlock): boolean => {
+  const lang = String(block.lang || "").toLowerCase();
+  if (lang !== "python" && lang !== "py") return false;
+  const code = String(block.code || "");
+  const nonEmptyLines = code.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (nonEmptyLines.length === 0) return false;
+  const nonComment = nonEmptyLines.filter((l) => !l.trim().startsWith("#"));
+  if (nonComment.length === 0) return false; // comments-only examples shouldn't show apply buttons
+  // Heuristic: prefer apply buttons for real strategy blocks (functions/classes) or substantial logic.
+  if (/\bdef\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(code)) return true;
+  if (/\bclass\s+[A-Za-z_][A-Za-z0-9_]*\b/.test(code)) return true;
+  if (nonComment.length >= 6) return true;
+  return false;
 };
 
 const parseConfigPatch = (block: ExtractedBlock): Record<string, unknown> | null => {
@@ -433,7 +472,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     proposed: string;
     mismatchWarning: string | null;
   }>(null);
-  const { selectedModel } = useAIStore();
+  const selectedModel = useResolvedAIModel();
   const queryClient = useQueryClient();
   const scrollRef = useRef<HTMLDivElement>(null);
   const refinementPollerRef = useRef<number | null>(null);
@@ -786,7 +825,8 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
               const prompt = [
                 `We just finished a refinement backtest (ID ${s.id}) for strategy '${strategyName}'.`,
                 `Metrics: profit=${pPct}, win_rate=${wrPct}, max_drawdown=${ddPct}, trades=${tr}.`,
-                "Explain what these results mean, what is likely wrong/right in the strategy logic, and propose the next refinement step.",
+                "Do NOT assume pairs/timeframe/fees/avg trade duration unless provided in context. If missing, ask.",
+                "Explain what these results mean, what is likely wrong/right in the strategy logic, and propose the next refinement step (top 3 experiments).",
               ].join("\n");
               setMessages((prev) => [
                 ...prev,
@@ -1105,6 +1145,24 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     },
   });
 
+  const runDiagnosticMutation = useMutation({
+    mutationFn: async (payload: any) => {
+      const res = await apiRequest("POST", "/api/diagnostic/analyze", payload);
+      return res.json();
+    },
+    onError: (error: any) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createMessageId(),
+          role: "assistant",
+          content: `Error running diagnostic: ${error?.message || "Failed to run diagnostic"}`,
+          timestamp: new Date(),
+        },
+      ]);
+    },
+  });
+
   useEffect(() => {
     const handleAttach = (e: any) => {
       setInput(prev => prev + (prev ? "\n\n" : "") + e.detail);
@@ -1331,26 +1389,30 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                   <pre className="truncate opacity-70 italic">"{context.selectedCode.substring(0, 100)}..."</pre>
                 </div>
               )}
-              <p className="text-xs mt-2 text-muted-foreground max-w-[240px] mx-auto">
-                I can help you generate code, refactor logic, debug issues, and document your trading strategies.
+              <p className="text-xs mt-2 text-muted-foreground max-w-[260px] mx-auto">
+                I’ll stay grounded in the exact strategy file + backtest metrics you have loaded and suggest changes only where they actually exist.
               </p>
-              <Button 
-                variant="outline" 
-                size="sm" 
-                className="h-8 text-[10px] gap-1.5 hover-elevate"
-                onClick={() => {
-                  const demoCode = "```python\n# Optimized RSI strategy\ndef populate_indicators(self, dataframe, metadata):\n    dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)\n    return dataframe\n```";
-                  setMessages([{
-                    id: crypto.randomUUID(),
-                    role: "assistant",
-                    content: "I've analyzed your RSI logic. Here is a more robust implementation with standard parameters:\n\n" + demoCode,
-                    timestamp: new Date()
-                  }]);
-                }}
-              >
-                <Zap className="w-3.5 h-3.5 text-primary" />
-                Show Demo Suggestion
-              </Button>
+              {context.backtestResults ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-[10px] gap-1.5 hover-elevate"
+                  onClick={() => {
+                    const r = context.backtestResults!;
+                    const prompt = [
+                      "Analyze this backtest (do NOT assume timeframe/pairs/fees unless present).",
+                      `Metrics: profit_total=${r.profit_total.toFixed(2)}%, win_rate=${r.win_rate.toFixed(2)}%, max_drawdown=${r.max_drawdown.toFixed(2)}%, total_trades=${r.total_trades}.`,
+                      "1) Summarize what looks good and the biggest risk.",
+                      "2) Propose the top 3 next experiments with expected impact.",
+                      "3) If you need more metrics (expectancy/profit factor/avg trade), ask for them explicitly.",
+                    ].join("\n");
+                    setInput((prev) => prev + (prev ? "\n\n" : "") + prompt);
+                  }}
+                >
+                  <Zap className="w-3.5 h-3.5 text-primary" />
+                  Explain Last Backtest
+                </Button>
+              ) : null}
             </div>
           )}
           {messages.map((message) => (
@@ -1385,6 +1447,24 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                     })}
                   </pre>
                 </div>
+                {message.role === "assistant" && parseChoiceBlocks(message.content).length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {parseChoiceBlocks(message.content).map((c) => (
+                      <Button
+                        key={c.label}
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
+                        onClick={() => {
+                          setInput((prev) => prev + (prev ? "\n" : "") + c.value);
+                        }}
+                        title={c.value}
+                      >
+                        {c.label}) {c.value.length > 42 ? `${c.value.slice(0, 42)}…` : c.value}
+                      </Button>
+                    ))}
+                  </div>
+                )}
                 {message.role === "assistant" && (onApplyCode || onApplyConfig) && extractCodeBlocks(message.content).length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {extractCodeBlocks(message.content).map((block, idx) => {
@@ -1392,7 +1472,11 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                       const action = parseActionBlock(block);
                       const hasConfigPatch = patch != null && Object.keys(patch).length > 0;
                       const hasAction = Boolean(action);
-                      const allowApplyToEditor = Boolean(onApplyCode) && !hasConfigPatch && !hasAction;
+                      const allowApplyToEditor =
+                        Boolean(onApplyCode) &&
+                        !hasConfigPatch &&
+                        !hasAction &&
+                        isLikelyEditablePythonSuggestion(block);
                       const mismatchWarningRaw = shouldWarnFunctionMismatch(context.selectedCode, cursorFunctionName, block);
                       const snippetFn = inferSingleFunctionName(block.code);
                       const canReplaceEnclosing =
@@ -1418,7 +1502,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                               size="sm"
                               variant="outline"
                               className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
-                              disabled={runBacktestMutation.isPending || runBatchMutation.isPending}
+                              disabled={runBacktestMutation.isPending || runBatchMutation.isPending || runDiagnosticMutation.isPending}
                               onClick={() => {
                                 if (!action) return;
 
@@ -1461,6 +1545,43 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                   const ok = confirm(`Run batch backtest now? (about ${countGuess} runs)`);
                                   if (!ok) return;
                                   runBatchNarrated(payload);
+                                  return;
+                                }
+
+                                if (action.action === "run_diagnostic") {
+                                  const backtestId = Number(action.payload?.backtestId ?? context.lastBacktest?.id ?? NaN);
+                                  if (!Number.isFinite(backtestId)) {
+                                    pushMessage("assistant", "Diagnostic action is missing backtestId.");
+                                    return;
+                                  }
+
+                                  const strategyPath = String(
+                                    action.payload?.strategyPath || context.lastBacktest?.strategyName || context.fileName || "",
+                                  ).trim();
+
+                                  const ok = confirm(`Queue diagnostics for backtest ${backtestId}?`);
+                                  if (!ok) return;
+
+                                  runDiagnosticMutation.mutate(
+                                    { backtestId, strategyPath: strategyPath || undefined },
+                                    {
+                                      onSuccess: (data: any) => {
+                                        const jobId = String(data?.jobId || "");
+                                        pushMessage(
+                                          "assistant",
+                                          jobId
+                                            ? `Diagnostics queued. Job ID: ${jobId}. Open the Diagnostics tab to track progress.`
+                                            : "Diagnostics queued. Open the Diagnostics tab to track progress.",
+                                        );
+                                        createAiAction({
+                                          actionType: "diagnostic_run",
+                                          description: jobId ? `Diagnostics queued (job ${jobId})` : "Diagnostics queued",
+                                          backtestId,
+                                          results: { jobId },
+                                        });
+                                      },
+                                    },
+                                  );
                                   return;
                                 }
 

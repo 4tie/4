@@ -286,6 +286,113 @@ function fileWindowByLine(content: string, lineNumber: number | undefined, radiu
   return `# File window: lines ${start}-${end} (cursor at ${target})\n${snippet}`;
 }
 
+type DerivedTradeMetrics = {
+  totalTrades: number;
+  winners: number;
+  losers: number;
+  expectancy?: number | null;
+  avgWin?: number | null;
+  avgLoss?: number | null;
+  profitFactor?: number | null;
+  winLossRatio?: number | null;
+  avgTradeDurationMin?: number | null;
+  tradesPerDay?: number | null;
+  units: "ratio" | "abs";
+  coverageRatio: number; // percent of trades with usable profit metric
+};
+
+function computeDerivedTradeMetrics(tradesRaw: any[]): DerivedTradeMetrics | null {
+  if (!Array.isArray(tradesRaw) || tradesRaw.length === 0) return null;
+
+  const trades = tradesRaw.filter((t) => t && typeof t === "object");
+  if (!trades.length) return null;
+
+  const ratios = trades
+    .map((t) => (Number.isFinite(Number(t.profit_ratio)) ? Number(t.profit_ratio) : NaN))
+    .filter((v) => Number.isFinite(v));
+
+  const abs = trades
+    .map((t) => (Number.isFinite(Number(t.profit_abs)) ? Number(t.profit_abs) : NaN))
+    .filter((v) => Number.isFinite(v));
+
+  const useRatios = ratios.length >= Math.max(3, Math.floor(trades.length * 0.5));
+  const profits = useRatios ? ratios : abs;
+
+  if (profits.length === 0) {
+    return {
+      totalTrades: trades.length,
+      winners: 0,
+      losers: 0,
+      units: "ratio",
+      coverageRatio: 0,
+    };
+  }
+
+  const winners = profits.filter((v) => v > 0);
+  const losers = profits.filter((v) => v < 0);
+  const sum = profits.reduce((a, b) => a + b, 0);
+  const sumWins = winners.reduce((a, b) => a + b, 0);
+  const sumLoss = losers.reduce((a, b) => a + b, 0);
+
+  const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
+  const expectancy = profits.length ? sum / profits.length : null;
+  const avgWin = avg(winners);
+  const avgLoss = avg(losers);
+  const profitFactor = sumLoss < 0 ? sumWins / Math.abs(sumLoss) : null;
+  const winLossRatio =
+    avgWin != null && avgLoss != null && avgLoss !== 0 ? avgWin / Math.abs(avgLoss) : null;
+
+  const durationsMin: number[] = [];
+  for (const t of trades) {
+    const open = Date.parse(String(t.open_date ?? t.open_date_utc ?? ""));
+    const close = Date.parse(String(t.close_date ?? t.close_date_utc ?? ""));
+    if (!Number.isFinite(open) || !Number.isFinite(close)) continue;
+    const mins = (close - open) / 60000;
+    if (Number.isFinite(mins) && mins >= 0) durationsMin.push(mins);
+  }
+
+  let tradesPerDay: number | null = null;
+  if (durationsMin.length > 0) {
+    const opens = trades
+      .map((t) => Date.parse(String(t.open_date ?? t.open_date_utc ?? "")))
+      .filter((v) => Number.isFinite(v));
+    const closes = trades
+      .map((t) => Date.parse(String(t.close_date ?? t.close_date_utc ?? "")))
+      .filter((v) => Number.isFinite(v));
+    const minTs = Math.min(...opens, ...closes);
+    const maxTs = Math.max(...opens, ...closes);
+    const spanDays = (maxTs - minTs) / (1000 * 60 * 60 * 24);
+    if (Number.isFinite(spanDays) && spanDays > 0) {
+      tradesPerDay = trades.length / spanDays;
+    }
+  }
+
+  return {
+    totalTrades: trades.length,
+    winners: winners.length,
+    losers: losers.length,
+    expectancy,
+    avgWin,
+    avgLoss,
+    profitFactor,
+    winLossRatio,
+    avgTradeDurationMin: durationsMin.length ? avg(durationsMin) : null,
+    tradesPerDay,
+    units: useRatios ? "ratio" : "abs",
+    coverageRatio: profits.length / trades.length,
+  };
+}
+
+function fmtMetric(value: number | null | undefined, digits = 3): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return value.toFixed(digits);
+}
+
+function fmtPct(value: number | null | undefined, digits = 2): string {
+  if (value == null || !Number.isFinite(value)) return "N/A";
+  return `${(value * 100).toFixed(digits)}%`;
+}
+
 function applyBacktestOverridesToConfig(baseConfig: any, runInput: any) {
   const next = baseConfig && typeof baseConfig === "object" ? JSON.parse(JSON.stringify(baseConfig)) : {};
   const cfg = runInput?.config && typeof runInput.config === "object" ? runInput.config : {};
@@ -998,6 +1105,11 @@ CRITICAL INSTRUCTIONS:
 5. Precision: Use the provided context (line numbers, selection) to give highly specific answers. If you see a bug, explain WHY it's a bug in a trading context.
 6. Documentation: Provide clear, educational comments within code blocks.
 
+Grounding Rules (Non-Negotiable):
+- Do NOT invent facts (pairs traded, timeframe, trade duration, win/loss counts, profit factor, etc.). If a value is not explicitly present in the provided context, label it as unknown and ask for it.
+- If you reference a file/function/parameter, it MUST exist in the provided file content. If it does not exist, ask the user to open the correct strategy file and do not guess.
+- When you make recommendations based on metrics, tie each recommendation to the specific metric(s) provided (e.g., win_rate, max_drawdown, profit_total, total_trades).
+
 Default Behavior:
 - If the user request is vague (e.g. "improve", "what's missing", "why is this bad") and backtest results are provided, you MUST proactively analyze the metrics and explain what is missing / likely wrong (expectancy, drawdown control, trade quality, exit logic, costs/slippage, overfitting).
 - If appropriate, propose concrete next steps (parameter changes, additional filters, risk controls) and explain why.
@@ -1009,10 +1121,18 @@ When Providing Code:
 
       systemPrompt += `\n\nConfig Updates:\n- If the user asks to change backtest configuration (strategy name, timeframe, stake, dates, pairs, limits), output a single \`\`\`json code block containing ONLY the keys to change from: strategy, timeframe, stake_amount, max_open_trades, tradable_balance_ratio, stoploss, trailing_stop, trailing_stop_positive, trailing_stop_positive_offset, trailing_only_offset_is_reached, minimal_roi, backtest_date_from, backtest_date_to, pairs. Example:\n\`\`\`json\n{\n  "strategy": "AIStrategy",\n  "timeframe": "5m",\n  "max_open_trades": 2,\n  "stoploss": -0.1,\n  "trailing_stop": true,\n  "trailing_stop_positive": 0.01,\n  "trailing_stop_positive_offset": 0.02,\n  "trailing_only_offset_is_reached": false,\n  "minimal_roi": {}\n}\n\`\`\``;
 
-      systemPrompt += `\n\nExecutable Actions (Optional):\n- If the user asks you to RUN a backtest, validate over different time ranges, or do a multi-range check, you MAY output a single \`\`\`action code block containing JSON with this shape:\n\`\`\`action\n{\n  "action": "run_backtest" | "run_batch_backtest",\n  "payload": { ... }\n}\n\`\`\`\n- For action \"run_backtest\", payload may include:\n  - strategyName (optional)\n  - config: { timeframe, stake_amount, backtest_date_from, backtest_date_to, timerange, pairs, max_open_trades, tradable_balance_ratio, ... }\n- For action \"run_batch_backtest\", payload may include:\n  - strategyName (optional)\n  - baseConfig: { timeframe, stake_amount, pairs, max_open_trades, tradable_balance_ratio, ... }\n  - ranges: [{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}, ...] OR rolling: {"windowDays":90,"stepDays":90,"count":4,"end":"YYYY-MM-DD"}\n- If the user asks for \"validate across time ranges\" but does NOT specify the ranges, default to a rolling plan of 4 windows of 90 days ending today.`;
+      systemPrompt += `\n\nExecutable Actions (Optional):\n- If the user asks you to RUN a backtest, validate over different time ranges, or do a multi-range check, you MAY output a single \`\`\`action code block containing JSON with this shape:\n\`\`\`action\n{\n  \"action\": \"run_backtest\" | \"run_batch_backtest\" | \"run_diagnostic\",\n  \"payload\": { ... }\n}\n\`\`\`\n- For action \"run_backtest\", payload may include:\n  - strategyName (optional)\n  - config: { timeframe, stake_amount, backtest_date_from, backtest_date_to, timerange, pairs, max_open_trades, tradable_balance_ratio, ... }\n- For action \"run_batch_backtest\", payload may include:\n  - strategyName (optional)\n  - baseConfig: { timeframe, stake_amount, pairs, max_open_trades, tradable_balance_ratio, ... }\n  - ranges: [{\"from\":\"YYYY-MM-DD\",\"to\":\"YYYY-MM-DD\"}, ...] OR rolling: {\"windowDays\":90,\"stepDays\":90,\"count\":4,\"end\":\"YYYY-MM-DD\"}\n- For action \"run_diagnostic\", payload must include:\n  - backtestId (required)\n  - strategyPath (optional)\n- If the user asks for \"validate across time ranges\" but does NOT specify the ranges, default to a rolling plan of 4 windows of 90 days ending today.`;
 
       systemPrompt += `\n\nTargeted Edits:\n- If the user has selected code, assume they want a targeted replacement. Return a single \`\`\`python code block containing ONLY the updated replacement snippet for the selected block (typically one function), and keep the same function name unless the user explicitly asks to rename it.\n- If the user has NOT selected code but the cursor is inside a function (cursorFunctionName is provided), prefer modifying that function and return ONLY that function definition as a single \`\`\`python code block.`;
       systemPrompt += `\n\nValidation Requirement:\n- Before you propose a code change, confirm that the function/class/attribute you are changing EXISTS in the provided file content.\n- If it does NOT exist, ask the user to open the correct strategy file and do NOT guess.\n- Prefer returning a single existing function (by name) rather than introducing new ones unless explicitly requested.`;
+
+      systemPrompt += `\n\nResponse Quality Bar:\n- Start with a 3–5 line summary grounded in provided metrics.\n- Then provide: (1) what looks good, (2) biggest risk, (3) the top 3 next experiments ordered by expected impact.\n- Every recommendation MUST cite the metric(s) that justify it (e.g., win_rate, profit_factor, expectancy, avg_win/loss, max_drawdown, trades_per_day).\n- If you need missing metrics to be confident (expectancy, avg profit, profit factor, fees/slippage assumptions, timeframe/pairs), ask concise follow-up questions instead of assuming.\n- If metrics are ambiguous or insufficient, present CHOICES with \"Run Diagnostic\" vs \"Continue with current metrics\" vs \"Ask for additional metrics\".\n`;
+
+      systemPrompt += `\n\nMetrics-to-Recommendation Mapping:\n- ALWAYS include a section titled \"Metrics-to-Recommendation Mapping\".\n- Provide 3–6 bullet points in the format:\n  - <metric> → <recommendation> (why)\n- Each recommendation must reference a metric value from the context.\n`;
+
+      systemPrompt += `\n\nFormatting Rules:\n- When you propose a concrete change, you MUST express it as one of these machine-readable blocks:\n  - \`\`\`python (for strategy code)\n  - \`\`\`json (for config patch)\n  - \`\`\`action (for running tools like backtest/diagnostic)\n- Avoid pseudo-code that cannot be applied.\n`;
+
+      systemPrompt += `\n\nUser Choice UI:\n- If you ask the user to choose between options, format them like this so the UI can show buttons:\nCHOICES:\n1) <option one>\n2) <option two>\n3) <option three>\n- Keep each option on a single line.\n`;
       
       if (context) {
         if (context.fileName) {
@@ -1064,6 +1184,38 @@ Reason about these metrics. For example:
 - Very low trade count (< 20-30) suggests statistical insignificance.
 - High drawdown (> 20%) with low profit suggests poor risk/reward.
 - Perfect backtests on low trade counts often indicate overfitting.`;
+        }
+
+        if ((context as any).lastBacktest?.id) {
+          const backtestId = Number((context as any).lastBacktest.id);
+          if (Number.isFinite(backtestId)) {
+            const backtest = await storage.getBacktest(backtestId);
+            const trades = (backtest as any)?.results?.trades;
+            const derived = computeDerivedTradeMetrics(Array.isArray(trades) ? trades : []);
+
+            if (derived) {
+              const expectancyText = derived.units === "ratio" ? fmtPct(derived.expectancy) : fmtMetric(derived.expectancy);
+              const avgWinText = derived.units === "ratio" ? fmtPct(derived.avgWin) : fmtMetric(derived.avgWin);
+              const avgLossText = derived.units === "ratio" ? fmtPct(derived.avgLoss) : fmtMetric(derived.avgLoss);
+
+              systemPrompt += `\n\nDERIVED METRICS (computed from trade list):`;
+              systemPrompt += `\n- Coverage: ${(derived.coverageRatio * 100).toFixed(0)}% of trades have usable profit data`;
+              systemPrompt += `\n- Expectancy (avg profit/trade): ${expectancyText}`;
+              systemPrompt += `\n- Avg Win: ${avgWinText}`;
+              systemPrompt += `\n- Avg Loss: ${avgLossText}`;
+              systemPrompt += `\n- Profit Factor: ${fmtMetric(derived.profitFactor, 2)}`;
+              systemPrompt += `\n- Win/Loss Ratio: ${fmtMetric(derived.winLossRatio, 2)}`;
+              systemPrompt += `\n- Avg Trade Duration: ${fmtMetric(derived.avgTradeDurationMin, 1)} minutes`;
+              systemPrompt += `\n- Trades per Day: ${fmtMetric(derived.tradesPerDay, 2)}`;
+              systemPrompt += `\n- Winners/Losers: ${derived.winners}/${derived.losers}`;
+
+              if (derived.totalTrades < 30) {
+                systemPrompt += `\nNOTE: Trade sample is small (<30). Avoid aggressive tuning and recommend longer timerange or more pairs.`;
+              }
+            } else {
+              systemPrompt += `\n\nDERIVED METRICS: unavailable (no trade list in backtest results).`;
+            }
+          }
         }
       }
 
