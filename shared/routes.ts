@@ -128,6 +128,58 @@ export const api = {
     },
   },
   strategies: {
+    edit: {
+      method: 'POST' as const,
+      path: '/api/strategies/edit',
+      input: (() => {
+        const strategyEditTargetSchema = z.discriminatedUnion("kind", [
+          z.object({ kind: z.literal("function"), name: z.string() }),
+          z.object({ kind: z.literal("class"), name: z.string() }),
+          z.object({ kind: z.literal("param"), name: z.string() }),
+          z.object({
+            kind: z.literal("range"),
+            startLine: z.number().int().min(1),
+            endLine: z.number().int().min(1),
+          }),
+        ]);
+        const strategyEditAnchorSchema = z.discriminatedUnion("kind", [
+          z.object({ kind: z.literal("after_function"), name: z.string() }),
+          z.object({ kind: z.literal("class_end"), name: z.string().optional() }),
+          z.object({ kind: z.literal("module_end") }),
+          z.object({ kind: z.literal("heuristic_indicators") }),
+        ]);
+        const strategyEditReplaceSchema = z.object({
+          kind: z.literal("replace"),
+          target: strategyEditTargetSchema,
+          before: z.string(),
+          after: z.string(),
+        });
+        const strategyEditInsertSchema = z.object({
+          kind: z.literal("insert"),
+          anchor: strategyEditAnchorSchema,
+          content: z.string(),
+        });
+        const strategyEditSchema = z.union([strategyEditReplaceSchema, strategyEditInsertSchema]);
+        return z.object({
+          strategyPath: z.string(),
+          edits: z.array(strategyEditSchema),
+          dryRun: z.boolean().optional(),
+        });
+      })(),
+      responses: {
+        200: z
+          .object({
+            success: z.boolean().optional(),
+            dryRun: z.boolean().optional(),
+            diff: z.string().optional(),
+            content: z.string().optional(),
+            applied: z.array(z.any()).optional(),
+          })
+          .passthrough(),
+        400: errorSchemas.validation,
+        500: errorSchemas.internal,
+      },
+    },
     params: {
       method: 'POST' as const,
       path: '/api/strategies/params',
@@ -278,6 +330,56 @@ export const api = {
       path: '/api/diagnostic/reports',
       responses: {
         200: z.array(z.any()),
+      },
+    },
+  },
+  diagnosticLoop: {
+    start: {
+      method: 'POST' as const,
+      path: '/api/diagnostic-loop/start',
+      input: z.object({
+        strategyPath: z.string(),
+        baseConfig: z.any(),
+        timerange: z.string().optional(),
+        pairs: z.array(z.string()).optional(),
+        maxIterations: z.number().int().min(1).max(3).optional(),
+        drawdownCap: z.number().min(0).max(1).optional(),
+      }),
+      responses: {
+        202: z.object({ runId: z.string(), status: z.string() }),
+        400: errorSchemas.validation,
+        500: errorSchemas.internal,
+      },
+    },
+    run: {
+      method: 'GET' as const,
+      path: '/api/diagnostic-loop/runs/:runId',
+      responses: {
+        200: z.any(),
+        404: errorSchemas.notFound,
+      },
+    },
+    runs: {
+      method: 'GET' as const,
+      path: '/api/diagnostic-loop/runs',
+      responses: {
+        200: z.array(z.any()),
+      },
+    },
+    stop: {
+      method: 'POST' as const,
+      path: '/api/diagnostic-loop/runs/:runId/stop',
+      responses: {
+        200: z.object({ success: z.boolean() }).passthrough(),
+        404: errorSchemas.notFound,
+      },
+    },
+    report: {
+      method: 'GET' as const,
+      path: '/api/diagnostic-loop/runs/:runId/report',
+      responses: {
+        200: z.any(),
+        404: errorSchemas.notFound,
       },
     },
   },

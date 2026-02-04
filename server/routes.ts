@@ -104,14 +104,27 @@ async function runDiagnosticJob(jobId: string) {
 
     const shouldFailFast = String(structuralReport?.verdict || "").toUpperCase() === "FAIL";
     let fullReport: any = null;
+    let failureSignalsReport: any = null;
+    let changeTargets: Array<{ kind: "insert"; anchor: { kind: "heuristic_indicators" }; changeType: string }> = [];
 
     let finalPhasesCompleted: string[] = [];
 
+    const buildChangeTargets = (report: any) => {
+      const recommended = report?.recommendedChangeTypes ?? [];
+      const targets = recommended.map((changeType: string) => ({
+        kind: "insert" as const,
+        anchor: { kind: "heuristic_indicators" as const },
+        changeType,
+      }));
+      return targets.length ? targets : [];
+    };
+
     if (shouldFailFast) {
       const phase11 = new Phase11Signals();
-      const failureSignalsReport = phase11.analyze({
+      failureSignalsReport = phase11.analyze({
         phase1: { structuralIntegrity: structuralReport },
       });
+      changeTargets = buildChangeTargets(failureSignalsReport);
       const phase10 = new Phase10Report();
       const finalSummary = phase10.analyze({
         phase1: { structuralIntegrity: structuralReport },
@@ -130,6 +143,7 @@ async function runDiagnosticJob(jobId: string) {
         phase1: { structuralIntegrity: structuralReport },
         phase11: { failureSignals: failureSignalsReport },
         summary: finalSummary,
+        changeTargets,
       };
 
       finalPhasesCompleted = ["phase1", "phase10", "phase11"];
@@ -168,7 +182,7 @@ async function runDiagnosticJob(jobId: string) {
       await progress(90, "phase10", ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9"]);
 
       const phase11 = new Phase11Signals();
-      const failureSignalsReport = phase11.analyze({
+      failureSignalsReport = phase11.analyze({
         phase1: { structuralIntegrity: structuralReport },
         phase2: { performance: performanceReport },
         phase3: { drawdownRisk: drawdownRiskReport },
@@ -177,6 +191,7 @@ async function runDiagnosticJob(jobId: string) {
         phase8: { logicIntegrity: logicIntegrityReport },
         phase9: { statistics: statisticsReport },
       });
+      changeTargets = buildChangeTargets(failureSignalsReport);
 
       const phase10 = new Phase10Report();
       const finalSummary = phase10.analyze({
@@ -211,6 +226,7 @@ async function runDiagnosticJob(jobId: string) {
         phase9: { statistics: statisticsReport },
         phase11: { failureSignals: failureSignalsReport },
         summary: finalSummary,
+        changeTargets,
       };
 
       finalPhasesCompleted = ["phase1", "phase2", "phase3", "phase4", "phase5", "phase6", "phase7", "phase8", "phase9", "phase10"];
@@ -225,6 +241,15 @@ async function runDiagnosticJob(jobId: string) {
       timerange,
       report: fullReport,
     });
+
+    if (changeTargets.length) {
+      await storage.createDiagnosticChangeTargets({
+        reportId,
+        backtestId: Number(job.backtestId),
+        strategy: job.strategyPath || "unknown",
+        targets: changeTargets,
+      });
+    }
 
     await storage.updateDiagnosticJob(jobId, {
       status: "completed",
@@ -625,6 +650,72 @@ export async function registerRoutes(
     } catch (err) {
       console.error("Sync error:", err);
       res.status(500).json({ message: "Failed to sync files" });
+    }
+  });
+
+  app.post(api.strategies.edit.path, async (req, res) => {
+    try {
+      const { strategyPath, edits, dryRun } = api.strategies.edit.input.parse(req.body);
+
+      const projectRoot = process.cwd();
+      const venvBin = path.join(projectRoot, ".venv", "bin");
+      const pythonBin = path.join(venvBin, "python");
+      const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "edit_tools.py");
+
+      if (!strategyPath.startsWith("user_data/strategies/")) {
+        return res.status(400).json({ message: "strategyPath must be under user_data/strategies/" });
+      }
+
+      const absStrategy = resolvePathWithinProject(strategyPath);
+
+      await fs.access(pythonBin);
+      await fs.access(scriptPath);
+
+      const env = {
+        ...process.env,
+        VIRTUAL_ENV: path.join(projectRoot, ".venv"),
+        PATH: process.env.PATH ? `${venvBin}:${process.env.PATH}` : venvBin,
+      };
+
+      const proc = spawn(pythonBin, [scriptPath, "apply", absStrategy], {
+        cwd: projectRoot,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      let out = "";
+      let err = "";
+      proc.stdout.on("data", (d) => (out += d.toString()));
+      proc.stderr.on("data", (d) => (err += d.toString()));
+
+      proc.stdin.write(JSON.stringify({ edits, dryRun }));
+      proc.stdin.end();
+
+      proc.on("close", async (code) => {
+        if (code !== 0) {
+          return res.status(400).json({ message: "Rejected change(s)", details: err || out });
+        }
+
+        if (!dryRun) {
+          try {
+            await storage.syncWithFilesystem();
+          } catch (e: any) {
+            return res.status(500).json({ message: "Applied but failed to sync filesystem", details: e?.message || String(e) });
+          }
+        }
+
+        try {
+          const parsed = JSON.parse(out);
+          return res.json(parsed);
+        } catch {
+          return res.json({ success: true, dryRun: Boolean(dryRun) });
+        }
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
     }
   });
 

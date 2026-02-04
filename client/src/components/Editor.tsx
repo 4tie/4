@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 export interface EditorState {
   selectedCode: string;
   lineNumber: number;
+  columnNumber: number;
 }
 
 export interface CodeEditorHandle {
@@ -307,6 +308,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(({ langu
       onEditorStateChange?.({
         selectedCode,
         lineNumber: e.position.lineNumber,
+        columnNumber: e.position.column,
       });
     });
 
@@ -332,6 +334,7 @@ export const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(({ langu
       onEditorStateChange?.({
         selectedCode,
         lineNumber: position?.lineNumber || 1,
+        columnNumber: position?.column || 1,
       });
     });
 

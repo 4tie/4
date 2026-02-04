@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { StrategyComparison } from "@/components/StrategyComparison";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Sidebar } from "@/components/Sidebar";
@@ -24,6 +24,7 @@ import { api } from "@shared/routes";
 type ViewMode = "ide" | "backtest" | "results" | "comparison" | "diagnostics";
 
 export default function Home() {
+  const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState<ViewMode>("ide");
   const [activeSidebarTab, setActiveSidebarTab] = useState<"explorer" | "backtests">("explorer");
   const [activeFileId, setActiveFileId] = useState<number | null>(null);
@@ -33,7 +34,7 @@ export default function Home() {
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
   const [chatOpen, setChatOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [editorState, setEditorState] = useState<EditorState>({ selectedCode: "", lineNumber: 1 });
+  const [editorState, setEditorState] = useState<EditorState>({ selectedCode: "", lineNumber: 1, columnNumber: 1 });
   const editorRef = useRef<CodeEditorHandle>(null);
   const [paramsOpen, setParamsOpen] = useState(false);
   const [diagnosticsPlacement, setDiagnosticsPlacement] = usePreferences<"header" | "sidebar">(
@@ -649,6 +650,7 @@ export default function Home() {
                 fileContent: chatFileContent,
                 selectedCode: (activeFilePath && chatFilePath === activeFilePath) ? editorState.selectedCode : "",
                 lineNumber: (activeFilePath && chatFilePath === activeFilePath) ? editorState.lineNumber : undefined,
+                columnNumber: (activeFilePath && chatFilePath === activeFilePath) ? editorState.columnNumber : undefined,
                 lastBacktest: displayedResultsBacktest
                   ? {
                       id: displayedResultsBacktest.id,
@@ -792,6 +794,54 @@ export default function Home() {
                     setChatSystemMessage(String(err?.message || "Config update failed"));
                   },
                 });
+              }}
+              onPreviewValidatedEdit={async ({ strategyPath, edits, dryRun }) => {
+                const path = String(strategyPath || "").trim();
+                if (!path.startsWith("user_data/strategies/") || !path.endsWith(".py")) {
+                  throw new Error("strategyPath must be a .py file under user_data/strategies/");
+                }
+                if (!Array.isArray(edits) || edits.length === 0) {
+                  throw new Error("No edits provided");
+                }
+
+                const res = await fetch(api.strategies.edit.path, {
+                  method: api.strategies.edit.method,
+                  headers: { "Content-Type": "application/json" },
+                  credentials: "include",
+                  body: JSON.stringify({ strategyPath: path, edits, dryRun: Boolean(dryRun) }),
+                });
+
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                  const msg =
+                    (data && typeof data === "object" && typeof (data as any).message === "string")
+                      ? String((data as any).message)
+                      : "Rejected change(s)";
+                  const details =
+                    (data && typeof data === "object" && typeof (data as any).details === "string")
+                      ? String((data as any).details)
+                      : "";
+                  throw new Error(details ? `${msg}: ${details}` : msg);
+                }
+
+                if (!dryRun) {
+                  const nextContent = typeof (data as any)?.content === "string" ? String((data as any).content) : null;
+
+                  queryClient.invalidateQueries({ queryKey: [api.files.list.path] });
+                  queryClient.invalidateQueries({ queryKey: [api.files.getByPath.path, path] });
+                  if (activeFileId) {
+                    queryClient.invalidateQueries({ queryKey: [api.files.get.path, activeFileId] });
+                  }
+
+                  if (activeFilePath && activeFilePath === path && nextContent != null) {
+                    setEditorContent(nextContent);
+                    setIsDirty(false);
+                  }
+
+                  setChatSystemMessage(`Strategy updated: ${path.split("/").pop()}`);
+                }
+
+                return data;
               }}
             />
           </ResizablePanel>

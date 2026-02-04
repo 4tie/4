@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, jsonb, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -41,6 +41,15 @@ export const diagnosticReports = pgTable("diagnostic_reports", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const diagnosticChangeTargets = pgTable("diagnostic_change_targets", {
+  id: serial("id").primaryKey(),
+  reportId: text("report_id").notNull().references(() => diagnosticReports.reportId),
+  backtestId: integer("backtest_id").references(() => backtests.id),
+  strategy: text("strategy"),
+  targets: jsonb("targets").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const diagnosticJobs = pgTable("diagnostic_jobs", {
   id: text("id").primaryKey(),
   backtestId: integer("backtest_id").references(() => backtests.id).notNull(),
@@ -53,6 +62,36 @@ export const diagnosticJobs = pgTable("diagnostic_jobs", {
   startedAt: timestamp("started_at"),
   finishedAt: timestamp("finished_at"),
   updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const diagnosticLoopRuns = pgTable("diagnostic_loop_runs", {
+  id: text("id").primaryKey(),
+  strategyPath: text("strategy_path").notNull(),
+  baseConfig: jsonb("base_config").notNull(),
+  status: text("status").notNull(),
+  progress: jsonb("progress"),
+  stopReason: text("stop_reason"),
+  report: jsonb("report"),
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const diagnosticLoopIterations = pgTable("diagnostic_loop_iterations", {
+  id: serial("id").primaryKey(),
+  runId: text("run_id").notNull().references(() => diagnosticLoopRuns.id),
+  iteration: integer("iteration").notNull(),
+  stage: text("stage").notNull(),
+  timeframe: text("timeframe").notNull(),
+  backtestId: integer("backtest_id").references(() => backtests.id),
+  features: jsonb("features"),
+  failure: text("failure"),
+  confidence: real("confidence"),
+  proposedChanges: jsonb("proposed_changes"),
+  validation: jsonb("validation"),
+  appliedDiff: text("applied_diff"),
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const aiChatSessions = pgTable("ai_chat_sessions", {
@@ -111,9 +150,21 @@ export const insertDiagnosticReportSchema = createInsertSchema(diagnosticReports
 export type DiagnosticReport = typeof diagnosticReports.$inferSelect;
 export type InsertDiagnosticReport = z.infer<typeof insertDiagnosticReportSchema>;
 
+export const insertDiagnosticChangeTargetSchema = createInsertSchema(diagnosticChangeTargets).omit({ id: true, createdAt: true });
+export type DiagnosticChangeTarget = typeof diagnosticChangeTargets.$inferSelect;
+export type InsertDiagnosticChangeTarget = z.infer<typeof insertDiagnosticChangeTargetSchema>;
+
 export const insertDiagnosticJobSchema = createInsertSchema(diagnosticJobs).omit({ createdAt: true, startedAt: true, finishedAt: true, updatedAt: true });
 export type DiagnosticJob = typeof diagnosticJobs.$inferSelect;
 export type InsertDiagnosticJob = z.infer<typeof insertDiagnosticJobSchema>;
+
+export const insertDiagnosticLoopRunSchema = createInsertSchema(diagnosticLoopRuns).omit({ createdAt: true, startedAt: true, finishedAt: true, updatedAt: true });
+export type DiagnosticLoopRun = typeof diagnosticLoopRuns.$inferSelect;
+export type InsertDiagnosticLoopRun = z.infer<typeof insertDiagnosticLoopRunSchema>;
+
+export const insertDiagnosticLoopIterationSchema = createInsertSchema(diagnosticLoopIterations).omit({ id: true, createdAt: true });
+export type DiagnosticLoopIteration = typeof diagnosticLoopIterations.$inferSelect;
+export type InsertDiagnosticLoopIteration = z.infer<typeof insertDiagnosticLoopIterationSchema>;
 
 export const insertAiChatSessionSchema = createInsertSchema(aiChatSessions).omit({ id: true, createdAt: true, updatedAt: true });
 export type AiChatSession = typeof aiChatSessions.$inferSelect;

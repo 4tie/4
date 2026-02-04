@@ -2,7 +2,10 @@ import { db } from "./db";
 import { and, eq, desc, asc, gt, sql } from "drizzle-orm";
 import {
   files as filesTable, backtests, diagnosticReports,
+  diagnosticChangeTargets,
   diagnosticJobs,
+  diagnosticLoopRuns,
+  diagnosticLoopIterations,
   aiChatSessions,
   aiChatMessages,
   aiAuditEvents,
@@ -11,7 +14,10 @@ import {
   type File, type InsertFile,
   type Backtest, type InsertBacktest,
   type DiagnosticReport, type InsertDiagnosticReport,
+  type DiagnosticChangeTarget, type InsertDiagnosticChangeTarget,
   type DiagnosticJob, type InsertDiagnosticJob,
+  type DiagnosticLoopRun, type InsertDiagnosticLoopRun,
+  type DiagnosticLoopIteration, type InsertDiagnosticLoopIteration,
   type AiChatSession,
   type AiChatMessage, type InsertAiChatMessage,
   type AiAuditEvent, type InsertAiAuditEvent,
@@ -42,6 +48,7 @@ export interface IStorage {
 
   // Diagnostics
   createDiagnosticReport(report: InsertDiagnosticReport): Promise<DiagnosticReport>;
+  createDiagnosticChangeTargets(targets: InsertDiagnosticChangeTarget): Promise<DiagnosticChangeTarget | null>;
   getDiagnosticReport(id: number): Promise<DiagnosticReport | undefined>;
   getDiagnosticReportByReportId(reportId: string): Promise<DiagnosticReport | undefined>;
   getDiagnosticReports(backtestId?: number): Promise<DiagnosticReport[]>;
@@ -51,6 +58,16 @@ export interface IStorage {
   updateDiagnosticJob(id: string, patch: Partial<DiagnosticJob>): Promise<DiagnosticJob>;
   getDiagnosticJob(id: string): Promise<DiagnosticJob | undefined>;
   getDiagnosticJobs(backtestId?: number): Promise<DiagnosticJob[]>;
+
+  // Diagnostic Loop
+  createDiagnosticLoopRun(run: InsertDiagnosticLoopRun): Promise<DiagnosticLoopRun>;
+  updateDiagnosticLoopRun(id: string, patch: Partial<DiagnosticLoopRun>): Promise<DiagnosticLoopRun>;
+  getDiagnosticLoopRun(id: string): Promise<DiagnosticLoopRun | undefined>;
+  getDiagnosticLoopRuns(): Promise<DiagnosticLoopRun[]>;
+
+  createDiagnosticLoopIteration(iteration: InsertDiagnosticLoopIteration): Promise<DiagnosticLoopIteration>;
+  updateDiagnosticLoopIteration(id: number, patch: Partial<DiagnosticLoopIteration>): Promise<DiagnosticLoopIteration>;
+  getDiagnosticLoopIterations(runId: string): Promise<DiagnosticLoopIteration[]>;
 
   // AI Chat Persistence
   getAiChatSessionByKey(sessionKey: string): Promise<AiChatSession | undefined>;
@@ -275,6 +292,18 @@ export class DatabaseStorage implements IStorage {
     return inserted;
   }
 
+  async createDiagnosticChangeTargets(
+    targets: InsertDiagnosticChangeTarget,
+  ): Promise<DiagnosticChangeTarget | null> {
+    try {
+      const [inserted] = await db.insert(diagnosticChangeTargets).values(targets).returning();
+      return inserted ?? null;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return null;
+      throw err;
+    }
+  }
+
   async getDiagnosticReport(id: number): Promise<DiagnosticReport | undefined> {
     const [report] = await db.select().from(diagnosticReports).where(eq(diagnosticReports.id, id));
     return report;
@@ -318,6 +347,54 @@ export class DatabaseStorage implements IStorage {
       return await db.select().from(diagnosticJobs).where(eq(diagnosticJobs.backtestId, backtestId)).orderBy(desc(diagnosticJobs.createdAt));
     }
     return await db.select().from(diagnosticJobs).orderBy(desc(diagnosticJobs.createdAt));
+  }
+
+  async createDiagnosticLoopRun(run: InsertDiagnosticLoopRun): Promise<DiagnosticLoopRun> {
+    const [inserted] = await db.insert(diagnosticLoopRuns).values(run).returning();
+    return inserted;
+  }
+
+  async updateDiagnosticLoopRun(id: string, patch: Partial<DiagnosticLoopRun>): Promise<DiagnosticLoopRun> {
+    const [updated] = await db.update(diagnosticLoopRuns)
+      .set({
+        ...patch,
+        updatedAt: new Date(),
+      } as any)
+      .where(eq(diagnosticLoopRuns.id, id))
+      .returning();
+    return updated;
+  }
+
+  async getDiagnosticLoopRun(id: string): Promise<DiagnosticLoopRun | undefined> {
+    const [run] = await db.select().from(diagnosticLoopRuns).where(eq(diagnosticLoopRuns.id, id));
+    return run;
+  }
+
+  async getDiagnosticLoopRuns(): Promise<DiagnosticLoopRun[]> {
+    return await db.select().from(diagnosticLoopRuns).orderBy(desc(diagnosticLoopRuns.createdAt));
+  }
+
+  async createDiagnosticLoopIteration(iteration: InsertDiagnosticLoopIteration): Promise<DiagnosticLoopIteration> {
+    const [inserted] = await db.insert(diagnosticLoopIterations).values(iteration as any).returning();
+    return inserted;
+  }
+
+  async updateDiagnosticLoopIteration(id: number, patch: Partial<DiagnosticLoopIteration>): Promise<DiagnosticLoopIteration> {
+    const [updated] = await db.update(diagnosticLoopIterations)
+      .set({
+        ...patch,
+      } as any)
+      .where(eq(diagnosticLoopIterations.id, id))
+      .returning();
+    return updated;
+  }
+
+  async getDiagnosticLoopIterations(runId: string): Promise<DiagnosticLoopIteration[]> {
+    return await db
+      .select()
+      .from(diagnosticLoopIterations)
+      .where(eq(diagnosticLoopIterations.runId, runId))
+      .orderBy(asc(diagnosticLoopIterations.createdAt));
   }
 
   async getAiChatSessionByKey(sessionKey: string): Promise<AiChatSession | undefined> {

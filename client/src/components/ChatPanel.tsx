@@ -16,6 +16,7 @@ interface ChatContext {
   fileContent?: string;
   selectedCode?: string;
   lineNumber?: number;
+  columnNumber?: number;
   cursorFunctionName?: string;
   lastBacktest?: {
     id?: number;
@@ -86,13 +87,16 @@ function createMessageId() {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
 }
 
+type ApplyMode = "selection" | "cursor" | "enclosingFunction" | "namedFunction";
+
 interface ChatPanelProps {
   isOpen: boolean;
   onToggle: () => void;
   context: ChatContext;
-  onApplyCode?: (code: string, mode?: "selection" | "cursor" | "enclosingFunction" | "namedFunction") => void;
+  onApplyCode?: (code: string, mode?: ApplyMode) => void;
   onApplyConfig?: (patch: Record<string, unknown>) => void;
-  onApplyAndSaveCode?: (code: string, mode?: "selection" | "cursor" | "enclosingFunction" | "namedFunction") => void;
+  onApplyAndSaveCode?: (code: string, mode?: ApplyMode) => void;
+  onPreviewValidatedEdit?: (payload: { strategyPath: string; edits: any[]; dryRun?: boolean }) => Promise<any>;
 }
 
 export function ChatToggleButton({ isOpen, onToggle }: { isOpen: boolean; onToggle: () => void }) {
@@ -247,9 +251,100 @@ const leadingIndent = (line: string) => {
   return m?.[0]?.length ?? 0;
 };
 
+const leadingIndentStr = (line: string) => {
+  const m = String(line || "").match(/^[\t ]*/);
+  return m?.[0] ?? "";
+};
+
+const dedentBlock = (src: string): string => {
+  const text = String(src || "").replace(/\r\n/g, "\n");
+  const lines = text.split("\n");
+  let min = Infinity;
+  for (const line of lines) {
+    if (!String(line).trim()) continue;
+    const ind = leadingIndentStr(line).length;
+    if (ind < min) min = ind;
+  }
+  if (!Number.isFinite(min) || min <= 0) return text;
+  return lines
+    .map((line) => {
+      if (!String(line).trim()) return line;
+      return line.slice(min);
+    })
+    .join("\n");
+};
+
+const reindentBlockTo = (src: string, targetIndent: string): string => {
+  const base = dedentBlock(src);
+  const lines = String(base || "").replace(/\r\n/g, "\n").split("\n");
+  return lines
+    .map((line) => {
+      if (!String(line).trim()) return line;
+      return `${targetIndent}${line}`;
+    })
+    .join("\n");
+};
+
+const inferStrategyMethodIndentFromFile = (fileContent: string | undefined): string => {
+  const src = typeof fileContent === "string" ? fileContent : "";
+  if (!src) return "    ";
+  const lines = src.split(/\r?\n/);
+
+  for (const line of lines) {
+    if (/^\s*def\s+populate_indicators\s*\(/.test(line)) {
+      return leadingIndentStr(line);
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (!/^\s*class\s+[A-Za-z_][A-Za-z0-9_]*\s*[(:]/.test(line)) continue;
+    const classIndent = leadingIndentStr(line);
+    for (let j = i + 1; j < lines.length; j++) {
+      const l2 = lines[j] ?? "";
+      if (!String(l2).trim()) continue;
+      const ind2 = leadingIndentStr(l2);
+      if (ind2.length <= classIndent.length) break;
+      if (/^\s*def\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(l2)) return ind2;
+    }
+  }
+
+  return "    ";
+};
+
 const isPythonDefLine = (line: string) => /^\s*def\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(String(line || ""));
 const isPythonDecoratorLine = (line: string) => /^\s*@/.test(String(line || ""));
 const isPythonClassLine = (line: string) => /^\s*class\s+[A-Za-z_][A-Za-z0-9_]*\s*[(:]/.test(String(line || ""));
+
+const findSelectionRangeFromFile = (
+  fileContent: string | undefined,
+  selectedCode: string | undefined,
+): { startLine: number; endLine: number; before: string } | null => {
+  const src = typeof fileContent === "string" ? fileContent : "";
+  const sel = typeof selectedCode === "string" ? selectedCode : "";
+  if (!src.trim() || !sel.trim()) return null;
+
+  const idx = src.indexOf(sel);
+  if (idx < 0) return null;
+  const idx2 = src.indexOf(sel, idx + Math.max(1, sel.length));
+  if (idx2 >= 0) return null;
+
+  const beforeChar = idx > 0 ? src[idx - 1] : "";
+  const endIdx = idx + sel.length;
+  const afterChar = endIdx < src.length ? src[endIdx] : "";
+  const endOnNewline = sel.endsWith("\n") || sel.endsWith("\r\n");
+  const alignedStart = idx === 0 || beforeChar === "\n";
+  const alignedEnd = endIdx === src.length || afterChar === "\n" || endOnNewline;
+  if (!alignedStart || !alignedEnd) return null;
+
+  const beforeText = src.slice(0, idx);
+  const startLine = beforeText.split(/\r?\n/).length;
+  const parts = sel.split(/\r?\n/);
+  const lineCount = parts.length - (endOnNewline ? 1 : 0);
+  const endLine = Math.max(startLine, startLine + Math.max(1, lineCount) - 1);
+
+  return { startLine, endLine, before: sel };
+};
 
 const inferEnclosingPythonFunctionNameFromFile = (fileContent: string | undefined, lineNumber: number | undefined): string | null => {
   if (!fileContent) return null;
@@ -449,7 +544,15 @@ const shouldWarnFunctionMismatch = (
   return `Cursor/selection appears inside \'${targetFn}\', but the AI snippet defines \'${snippetFn}\'. Apply anyway?`;
 };
 
-export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfig, onApplyAndSaveCode }: ChatPanelProps) {
+export function ChatPanel({
+  isOpen,
+  onToggle,
+  context,
+  onApplyCode,
+  onApplyConfig,
+  onApplyAndSaveCode,
+  onPreviewValidatedEdit,
+}: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState<number | null>(null);
@@ -465,12 +568,17 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
   });
   const [refinement, setRefinement] = useState<RefinementState | null>(null);
   const [preview, setPreview] = useState<null | {
+    id: string;
     title: string;
-    mode: "selection" | "cursor" | "enclosingFunction" | "namedFunction";
+    mode: ApplyMode;
     currentLabel: string;
     current: string;
     proposed: string;
     mismatchWarning: string | null;
+    edits: any[] | null;
+    diff: string | null;
+    error: string | null;
+    isValidating: boolean;
   }>(null);
   const selectedModel = useResolvedAIModel();
   const queryClient = useQueryClient();
@@ -564,7 +672,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
     }
   };
 
-  const logCodeChange = (code: string, mode: "selection" | "cursor" | "enclosingFunction" | "namedFunction") => {
+  const logCodeChange = (code: string, mode: ApplyMode) => {
     const before = (() => {
       if (mode === "selection") return context.selectedCode;
       if (mode === "enclosingFunction") return enclosingFunctionBlock?.code ?? null;
@@ -581,6 +689,57 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
       beforeState: { mode, selection: before || "" },
       afterState: { mode, code },
     });
+  };
+
+  const requestValidatedPreview = async (payload: {
+    title: string;
+    mode: ApplyMode;
+    currentLabel: string;
+    current: string;
+    proposed: string;
+    mismatchWarning: string | null;
+    edits: any[] | null;
+  }) => {
+    const id = createMessageId();
+    const wantsValidatedSave =
+      Boolean(onPreviewValidatedEdit) &&
+      Boolean(canApplyAndSave) &&
+      typeof context.fileName === "string";
+
+    const hasEdits = Array.isArray(payload.edits) && payload.edits.length > 0;
+    const shouldValidate = wantsValidatedSave && hasEdits;
+    const unsupportedReason = wantsValidatedSave && !hasEdits
+      ? "Cannot build a validated edit for this change. Select whole lines, or apply a single function snippet so it can be replaced safely."
+      : null;
+
+    setPreview({
+      id,
+      title: payload.title,
+      mode: payload.mode,
+      currentLabel: payload.currentLabel,
+      current: payload.current,
+      proposed: payload.proposed,
+      mismatchWarning: payload.mismatchWarning,
+      edits: payload.edits,
+      diff: null,
+      error: unsupportedReason,
+      isValidating: shouldValidate,
+    });
+
+    if (!shouldValidate) return;
+
+    try {
+      const res = await onPreviewValidatedEdit!({
+        strategyPath: String(context.fileName),
+        edits: payload.edits as any[],
+        dryRun: true,
+      });
+      const diff = typeof (res as any)?.diff === "string" ? String((res as any).diff) : null;
+      setPreview((prev) => (prev && prev.id === id ? { ...prev, diff, error: null, isValidating: false } : prev));
+    } catch (e: any) {
+      const msg = String(e?.message || e || "Validation failed");
+      setPreview((prev) => (prev && prev.id === id ? { ...prev, error: msg, isValidating: false } : prev));
+    }
   };
 
   const logConfigChange = (patch: Record<string, unknown>) => {
@@ -1490,10 +1649,122 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                         Boolean(snippetFn) &&
                         Boolean(namedTarget?.code);
 
-                      const applyMode: "selection" | "cursor" | "enclosingFunction" | "namedFunction" = hasSelection
+                      const applyMode: ApplyMode = hasSelection
                         ? "selection"
                         : (canReplaceEnclosing ? "enclosingFunction" : (canReplaceByName ? "namedFunction" : "cursor"));
                       const mismatchWarning = applyMode === "namedFunction" ? null : mismatchWarningRaw;
+
+                      const proposedNormalized = (() => {
+                        const snippet = String(block.code || "");
+                        if (applyMode === "selection") {
+                          const first = String(context.selectedCode || "").split(/\r?\n/).find((l) => String(l).trim()) || "";
+                          return reindentBlockTo(snippet, leadingIndentStr(first));
+                        }
+                        if (applyMode === "enclosingFunction") {
+                          const first = String(enclosingFunctionBlock?.code || "")
+                            .split(/\r?\n/)
+                            .find((l) => String(l).trim()) || "";
+                          return reindentBlockTo(snippet, leadingIndentStr(first));
+                        }
+                        if (applyMode === "namedFunction") {
+                          const first = String(namedTarget?.code || "").split(/\r?\n/).find((l) => String(l).trim()) || "";
+                          return reindentBlockTo(snippet, leadingIndentStr(first));
+                        }
+                        const firstNonEmpty = snippet.split(/\r?\n/).find((l) => String(l).trim().length > 0) || "";
+                        const ind = leadingIndent(firstNonEmpty);
+                        const isClassOrTopLevel = /^\s*class\s+/.test(firstNonEmpty) || /^\s*def\s+/.test(firstNonEmpty);
+                        const useHeuristic = ind > 0 && isClassOrTopLevel;
+                        if (useHeuristic) {
+                          const methodIndent = inferStrategyMethodIndentFromFile(context.fileContent);
+                          return reindentBlockTo(snippet, methodIndent);
+                        }
+                        return dedentBlock(snippet);
+                      })();
+
+                      const previewCurrentLabel =
+                        applyMode === "selection"
+                          ? "Selected"
+                          : (applyMode === "enclosingFunction"
+                            ? `Function '${cursorFunctionName ?? ""}'`
+                            : (applyMode === "namedFunction" ? `Function '${snippetFn ?? ""}'` : "Cursor Context"));
+                      const previewCurrent =
+                        applyMode === "selection"
+                          ? String(context.selectedCode || "")
+                          : (applyMode === "enclosingFunction"
+                            ? (enclosingFunctionBlock?.code ?? getCursorContextSnippet(context.fileContent, context.lineNumber))
+                            : (applyMode === "namedFunction"
+                              ? (namedTarget?.code ?? getCursorContextSnippet(context.fileContent, context.lineNumber))
+                              : getCursorContextSnippet(context.fileContent, context.lineNumber)));
+                      const previewTitle =
+                        applyMode === "selection"
+                          ? "Preview: Replace Selection"
+                          : (applyMode === "enclosingFunction"
+                            ? "Preview: Replace Current Function"
+                            : (applyMode === "namedFunction" ? "Preview: Replace Function by Name" : "Preview: Insert"));
+
+                      const previewEdits = (() => {
+                        if (!canApplyAndSave) return null;
+                        if (applyMode === "selection") {
+                          const r = findSelectionRangeFromFile(context.fileContent, context.selectedCode);
+                          if (!r) return null;
+                          return [
+                            {
+                              kind: "replace",
+                              target: { kind: "range", startLine: r.startLine, endLine: r.endLine },
+                              before: r.before,
+                              after: proposedNormalized,
+                            },
+                          ];
+                        }
+                        if (applyMode === "enclosingFunction" && cursorFunctionName && enclosingFunctionBlock?.code) {
+                          return [
+                            {
+                              kind: "replace",
+                              target: { kind: "function", name: cursorFunctionName },
+                              before: enclosingFunctionBlock.code,
+                              after: proposedNormalized,
+                            },
+                          ];
+                        }
+                        if (applyMode === "namedFunction" && snippetFn && namedTarget?.code) {
+                          return [
+                            {
+                              kind: "replace",
+                              target: { kind: "function", name: snippetFn },
+                              before: namedTarget.code,
+                              after: proposedNormalized,
+                            },
+                          ];
+                        }
+                        if (applyMode === "cursor") {
+                          const firstNonEmpty = String(block.code || "")
+                            .split(/\r?\n/)
+                            .find((l) => String(l).trim().length > 0) || "";
+                          const ind = leadingIndent(firstNonEmpty);
+                          const isClassOrTopLevel = /^\s*class\s+/.test(firstNonEmpty) || /^\s*def\s+/.test(firstNonEmpty);
+                          const useHeuristic = ind > 0 && isClassOrTopLevel;
+                          return [
+                            {
+                              kind: "insert",
+                              anchor: useHeuristic ? { kind: "heuristic_indicators" } : { kind: "module_end" },
+                              content: proposedNormalized,
+                            },
+                          ];
+                        }
+                        return null;
+                      })();
+
+                      const openPreview = () => {
+                        requestValidatedPreview({
+                          title: previewTitle,
+                          mode: applyMode,
+                          currentLabel: previewCurrentLabel,
+                          current: previewCurrent,
+                          proposed: proposedNormalized,
+                          mismatchWarning,
+                          edits: previewEdits,
+                        });
+                      };
 
                       return (
                         <div key={idx} className="flex gap-2">
@@ -1597,39 +1868,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                               size="sm"
                               variant="outline"
                               className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
-                              onClick={() => {
-                                const currentLabel =
-                                  applyMode === "selection"
-                                    ? "Selected"
-                                    : (applyMode === "enclosingFunction"
-                                      ? `Function '${cursorFunctionName ?? ""}'`
-                                      : (applyMode === "namedFunction"
-                                        ? `Function '${snippetFn ?? ""}'`
-                                        : "Cursor Context"));
-                                const current =
-                                  applyMode === "selection"
-                                    ? String(context.selectedCode || "")
-                                    : (applyMode === "enclosingFunction"
-                                      ? (enclosingFunctionBlock?.code ?? getCursorContextSnippet(context.fileContent, context.lineNumber))
-                                      : (applyMode === "namedFunction"
-                                        ? (namedTarget?.code ?? getCursorContextSnippet(context.fileContent, context.lineNumber))
-                                        : getCursorContextSnippet(context.fileContent, context.lineNumber)));
-                                const title =
-                                  applyMode === "selection"
-                                    ? "Preview: Replace Selection"
-                                    : (applyMode === "enclosingFunction"
-                                      ? "Preview: Replace Current Function"
-                                      : (applyMode === "namedFunction" ? "Preview: Replace Function by Name" : "Preview: Insert at Cursor"));
-
-                                setPreview({
-                                  title,
-                                  mode: applyMode,
-                                  currentLabel,
-                                  current,
-                                  proposed: block.code,
-                                  mismatchWarning,
-                                });
-                              }}
+                              onClick={openPreview}
                             >
                               <Eye className="w-3 h-3" />
                               Preview
@@ -1640,26 +1879,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                               size="sm"
                               variant="outline"
                               className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
-                              onClick={() => {
-                                if (!hasSelection) {
-                                  if (canReplaceEnclosing) {
-                                    const ok = confirm(`Replace current function '${cursorFunctionName}' with this snippet?`);
-                                    if (!ok) return;
-                                  } else if (canReplaceByName) {
-                                    const ok = confirm(`Replace function '${snippetFn}' (by name) with this snippet?`);
-                                    if (!ok) return;
-                                  } else {
-                                    const ok = confirm("No code is selected. Insert this snippet at the current cursor position?");
-                                    if (!ok) return;
-                                  }
-                                }
-                                if (mismatchWarning) {
-                                  const ok = confirm(mismatchWarning);
-                                  if (!ok) return;
-                                }
-                                onApplyCode?.(block.code, applyMode);
-                                logCodeChange(block.code, applyMode);
-                              }}
+                              onClick={openPreview}
                             >
                               <Code className="w-3 h-3" />
                               {hasSelection
@@ -1668,7 +1888,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                                   ? "Replace Current Function"
                                   : (canReplaceByName
                                     ? `Replace Function '${snippetFn}'`
-                                    : "Insert at Cursor"))}
+                                    : "Insert"))}
                             </Button>
                           )}
                           {allowApplyToEditor && canApplyAndSave && Boolean(onApplyAndSaveCode) && (
@@ -1676,28 +1896,7 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                               size="sm"
                               variant="outline"
                               className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
-                              onClick={() => {
-                                if (!hasSelection) {
-                                  if (canReplaceEnclosing) {
-                                    const ok = confirm(`Replace current function '${cursorFunctionName}' with this snippet?`);
-                                    if (!ok) return;
-                                  } else if (canReplaceByName) {
-                                    const ok = confirm(`Replace function '${snippetFn}' (by name) with this snippet?`);
-                                    if (!ok) return;
-                                  } else {
-                                    const ok = confirm("No code is selected. Insert this snippet at the current cursor position?");
-                                    if (!ok) return;
-                                  }
-                                }
-                                if (mismatchWarning) {
-                                  const ok = confirm(mismatchWarning);
-                                  if (!ok) return;
-                                }
-                                const ok = confirm("Apply this change and save the strategy file now?");
-                                if (!ok) return;
-                                onApplyAndSaveCode?.(block.code, applyMode);
-                                logCodeChange(block.code, applyMode);
-                              }}
+                              onClick={openPreview}
                             >
                               <Save className="w-3 h-3" />
                               Apply & Save
@@ -1748,8 +1947,12 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
         <DialogContent className="max-w-5xl">
           <DialogHeader>
             <DialogTitle>{preview?.title ?? "Preview"}</DialogTitle>
-            {preview?.mismatchWarning ? (
+            {preview?.error ? (
+              <DialogDescription className="text-destructive">{preview.error}</DialogDescription>
+            ) : preview?.mismatchWarning ? (
               <DialogDescription className="text-destructive">{preview.mismatchWarning}</DialogDescription>
+            ) : preview?.isValidating ? (
+              <DialogDescription>Validating change...</DialogDescription>
             ) : (
               <DialogDescription>Review the change below before applying.</DialogDescription>
             )}
@@ -1772,6 +1975,17 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
             </div>
           </div>
 
+          {(preview?.diff || preview?.isValidating || preview?.error) && (
+            <div className="mt-3 border border-border/40 rounded-md overflow-hidden">
+              <div className="px-3 py-2 text-xs font-medium bg-muted/50 border-b border-border/40">
+                Validated Diff
+              </div>
+              <pre className="p-3 text-xs font-mono whitespace-pre overflow-auto max-h-[35vh] bg-black/20">
+                {preview?.diff || (preview?.isValidating ? "Validating..." : (preview?.error ? "Validation failed" : ""))}
+              </pre>
+            </div>
+          )}
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setPreview(null)}>
               Cancel
@@ -1784,19 +1998,49 @@ export function ChatPanel({ isOpen, onToggle, context, onApplyCode, onApplyConfi
                 logCodeChange(preview.proposed, preview.mode);
                 setPreview(null);
               }}
-              disabled={!onApplyCode}
+              disabled={!onApplyCode || Boolean(preview?.isValidating)}
             >
               Apply
             </Button>
             <Button
               variant="outline"
-              onClick={() => {
+              onClick={async () => {
                 if (!preview) return;
+                if (preview.mismatchWarning) {
+                  const ok = confirm(preview.mismatchWarning);
+                  if (!ok) return;
+                }
+                if (preview.isValidating || preview.error) return;
+
+                if (
+                  canApplyAndSave &&
+                  onPreviewValidatedEdit &&
+                  typeof context.fileName === "string" &&
+                  Array.isArray(preview.edits) &&
+                  preview.edits.length > 0
+                ) {
+                  setPreview((p) => (p ? { ...p, isValidating: true } : p));
+                  try {
+                    await onPreviewValidatedEdit({ strategyPath: String(context.fileName), edits: preview.edits, dryRun: false });
+                    logCodeChange(preview.proposed, preview.mode);
+                    setPreview(null);
+                  } catch (e: any) {
+                    const msg = String(e?.message || e || "Apply failed");
+                    setPreview((p) => (p ? { ...p, error: msg, isValidating: false } : p));
+                  }
+                  return;
+                }
+
                 onApplyAndSaveCode?.(preview.proposed, preview.mode);
                 logCodeChange(preview.proposed, preview.mode);
                 setPreview(null);
               }}
-              disabled={!canApplyAndSave || !onApplyAndSaveCode}
+              disabled={
+                !canApplyAndSave ||
+                (!onApplyAndSaveCode && !onPreviewValidatedEdit) ||
+                Boolean(preview?.isValidating) ||
+                Boolean(preview?.error)
+              }
             >
               Apply & Save
             </Button>

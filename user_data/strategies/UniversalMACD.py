@@ -1,20 +1,4 @@
-   def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-       # Add additional confirmation
-       cooldownt = 3  # trade days between consecutive closed trades
-       dataframe['close3'] = dataframe['close'].shift(3)
-       dataframe['active'] = (dataframe['enter_long'] < dataframe['close3'])
-       df_prev = (dataframe['enter_long'].shift(cooldownt) > dataframe['close3'])
-       df_prev = df_prev.to_boolean()
-       df_prev[df_prev > 0] and (dataframe['umacd'] < self.sell_umacd_min.value) and (dataframe['close'] < dataframe[f'trailing-stop'])
-       return dataframe
-      "minimal_roi": {
-       "0": 0.015,
-       "10": 0.02,
-       "50": 0.025,
-       "100": 0.03,
-       "200": 0
-   }
-   
+
 # flake8: noqa: F401
 # isort: skip_file
 # --- Do not remove these libs ---

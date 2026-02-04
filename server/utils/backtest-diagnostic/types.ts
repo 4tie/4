@@ -264,6 +264,17 @@ export interface FailureSignalsReport {
   recommendedChangeTypes: string[];
 }
 
+export interface DiagnosticChangeTarget {
+  kind: "function" | "insert" | "config" | "attribute";
+  name?: string;
+  anchor?: {
+    kind: "after_function" | "class_end" | "module_end" | "heuristic_indicators";
+    name?: string;
+  };
+  changeType?: string;
+  note?: string;
+}
+
 export interface DiagnosticReport {
   metadata: {
     reportId: string;
@@ -311,4 +322,5 @@ export interface DiagnosticReport {
     statisticalVerdict: 'PASS' | 'FAIL';
     suggestedFixes: string[];
   };
+  changeTargets?: DiagnosticChangeTarget[];
 }
