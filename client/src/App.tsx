@@ -6,11 +6,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import NotFound from "@/pages/not-found";
 import Home from "@/pages/Home";
+import DarkWorkspace from "@/pages/DarkWorkspace";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      <Route path="/workspace" component={DarkWorkspace} />
       <Route component={NotFound} />
     </Switch>
   );

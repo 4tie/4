@@ -26,8 +26,23 @@ type DiagnosticProgress = {
   phasesCompleted: string[];
 };
 
+type DiagnosticLoopProgress = {
+  percent: number;
+  iteration: number;
+  stage: string;
+  timeframe: string;
+  step: string;
+};
+
 const diagnosticQueue: string[] = [];
 let diagnosticWorkerRunning = false;
+
+const diagnosticLoopQueue: string[] = [];
+let diagnosticLoopWorkerRunning = false;
+const diagnosticLoopStopRequests = new Set<string>();
+
+let cachedBinance24hTickers: any[] | null = null;
+let cachedBinance24hTickersAt = 0;
 
 async function enqueueDiagnosticJob(jobId: string) {
   diagnosticQueue.push(jobId);
@@ -35,6 +50,805 @@ async function enqueueDiagnosticJob(jobId: string) {
     processDiagnosticQueue().catch((err) => {
       console.error("Diagnostic queue error:", err);
     });
+  }
+}
+
+function clampNum(value: unknown, min: number, max: number): number {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runPythonTool(scriptPath: string, args: string[], stdinObj?: any): Promise<{ code: number; out: string; err: string }> {
+  const projectRoot = process.cwd();
+  const venvBin = path.join(projectRoot, ".venv", "bin");
+  const pythonBin = path.join(venvBin, "python");
+
+  const env = {
+    ...process.env,
+    VIRTUAL_ENV: path.join(projectRoot, ".venv"),
+    PATH: process.env.PATH ? `${venvBin}:${process.env.PATH}` : venvBin,
+  };
+
+  const proc = spawn(pythonBin, [scriptPath, ...args], { cwd: projectRoot, env, stdio: ["pipe", "pipe", "pipe"] });
+  let out = "";
+  let err = "";
+  proc.stdout.on("data", (d) => (out += d.toString()));
+  proc.stderr.on("data", (d) => (err += d.toString()));
+  if (stdinObj !== undefined) {
+    proc.stdin.write(JSON.stringify(stdinObj));
+  }
+  proc.stdin.end();
+
+  const code = await new Promise<number>((resolve) => {
+    proc.on("close", (c) => resolve(typeof c === "number" ? c : 1));
+  });
+
+  return { code, out, err };
+}
+
+async function chooseDiagnosticLoopFixWithAi(input: {
+  model: string;
+  features: any;
+  failure: string;
+  confidence: number;
+  evidence: any[];
+  allowedFixes: Array<{ id: string; scope: string; paramChanges: any[]; attrChanges: any[] }>;
+}): Promise<{ selectedFixId: string; rationale?: string } | null> {
+  const apiKey = getOpenRouterApiKey();
+  const baseUrl = getOpenRouterBaseUrl();
+  if (!apiKey) return null;
+
+  const system =
+    "You are a rule-driven strategy diagnostic assistant. You must only select from the provided allowedFixes. " +
+    "Return STRICT JSON only.";
+
+  const user = JSON.stringify(
+    {
+      task: "Select the single best fix to try next.",
+      constraints: {
+        must_select_from_allowedFixes: true,
+        max_changes: 3,
+        max_numeric_delta_pct: 30,
+        no_entry_and_exit_together: true,
+      },
+      context: {
+        failure: input.failure,
+        confidence: input.confidence,
+        evidence: input.evidence,
+        features: input.features,
+      },
+      allowedFixes: input.allowedFixes.map((f) => ({
+        id: f.id,
+        scope: f.scope,
+        paramChanges: f.paramChanges?.map((c: any) => ({ name: c.name, from: c.from, to: c.to })) ?? [],
+        attrChanges: f.attrChanges?.map((c: any) => ({ name: c.name, from: c.from, to: c.to })) ?? [],
+      })),
+      response_schema: {
+        selectedFixId: "<one of allowedFixes[].id>",
+        rationale: "short explanation",
+      },
+    },
+    null,
+    2,
+  );
+
+  const upstreamRes = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://replit.com",
+    },
+    body: JSON.stringify({
+      model: input.model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      max_tokens: 256,
+    }),
+  });
+
+  if (!upstreamRes.ok) {
+    return null;
+  }
+
+  const data = await upstreamRes.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const content = String(data?.choices?.[0]?.message?.content ?? "").trim();
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1));
+    const selectedFixId = typeof parsed?.selectedFixId === "string" ? parsed.selectedFixId : "";
+    if (!selectedFixId) return null;
+    const rationale = typeof parsed?.rationale === "string" ? parsed.rationale : undefined;
+    return { selectedFixId, rationale };
+  } catch {
+    return null;
+  }
+}
+
+async function extractStrategyParams(strategyPath: string): Promise<any[]> {
+  const projectRoot = process.cwd();
+  const absStrategy = resolvePathWithinProject(strategyPath);
+  const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "param_tools.py");
+  const res = await runPythonTool(scriptPath, ["extract", absStrategy]);
+  if (res.code !== 0) throw new Error(res.err || res.out || "param extract failed");
+  const parsed = JSON.parse(res.out);
+  return Array.isArray(parsed?.params) ? parsed.params : [];
+}
+
+async function applyStrategyParamChanges(strategyPath: string, changes: Array<{ name: string; before: string; after: string }>): Promise<void> {
+  const projectRoot = process.cwd();
+  const absStrategy = resolvePathWithinProject(strategyPath);
+  const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "param_tools.py");
+  const res = await runPythonTool(scriptPath, ["apply", absStrategy], { changes });
+  if (res.code !== 0) throw new Error(res.err || res.out || "param apply failed");
+}
+
+async function extractStrategyAttrs(strategyPath: string): Promise<any[]> {
+  const projectRoot = process.cwd();
+  const absStrategy = resolvePathWithinProject(strategyPath);
+  const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "attr_tools.py");
+  const res = await runPythonTool(scriptPath, ["extract", absStrategy]);
+  if (res.code !== 0) throw new Error(res.err || res.out || "attr extract failed");
+  const parsed = JSON.parse(res.out);
+  return Array.isArray(parsed?.attrs) ? parsed.attrs : [];
+}
+
+async function applyStrategyAttrChanges(strategyPath: string, changes: Array<{ name: string; before: string; after: string }>): Promise<void> {
+  const projectRoot = process.cwd();
+  const absStrategy = resolvePathWithinProject(strategyPath);
+  const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "attr_tools.py");
+  const res = await runPythonTool(scriptPath, ["apply", absStrategy], { changes });
+  if (res.code !== 0) throw new Error(res.err || res.out || "attr apply failed");
+}
+
+function simpleDiffText(before: string, after: string): string {
+  if (before === after) return "";
+  const b = clampText(before, 4000);
+  const a = clampText(after, 4000);
+  return `--- before\n${b}\n\n+++ after\n${a}\n`;
+}
+
+function backtestFailureInfo(bt: any): { status: string; message: string; logsTail: string[] } {
+  const status = String(bt?.status || "unknown");
+  const logs = Array.isArray(bt?.logs) ? bt.logs.map((l: any) => String(l)) : [];
+  const tail = logs.slice(-25);
+  const msg = (() => {
+    const joined = tail.join("\n");
+    const m1 = joined.match(/No data found\.[\s\S]*?Terminating\./i);
+    if (m1) return "No data found for requested timeframe/timerange. Download data or adjust timerange.";
+    const m2 = joined.match(/\bERROR\b[\s\S]{0,200}/i);
+    if (m2) return m2[0];
+    return `Backtest status: ${status}`;
+  })();
+  return { status, message: msg, logsTail: tail };
+}
+
+function classifyLoopFailure(input: {
+  perf: any;
+  entry: any;
+  exit: any;
+  drawdown: any;
+  stats: any;
+}): { failure: string; confidence: number; evidence: any[] } {
+  const evidence: any[] = [];
+  const trades = Number(input.perf?.expectancy?.totals?.totalTrades ?? input.perf?.distribution?.totalTrades ?? 0);
+  const quickLoserPct = input.entry?.timing?.quickLoserPct;
+  const durationRatio = input.exit?.duration?.durationRatio;
+  const stopLossCount = Number(input.exit?.exitReasons?.exitTypes?.stopLoss?.count ?? 0);
+  const totalExits = Object.values(input.exit?.exitReasons?.exitTypes ?? {}).reduce((s: number, v: any) => s + Number(v?.count ?? 0), 0);
+  const stopLossPct = totalExits > 0 ? stopLossCount / totalExits : 0;
+  const maxDd = Number(input.drawdown?.drawdownStructure?.maxDrawdown ?? NaN);
+  const verdict = String(input.stats?.sampleAdequacy?.verdict ?? "FAIL");
+  const ci = input.stats?.sampleAdequacy?.confidenceInterval95;
+  const ciLo = Array.isArray(ci) ? Number(ci[0]) : NaN;
+
+  if (!Number.isFinite(trades) || trades <= 0 || trades < 10) {
+    evidence.push({ metric: "trade_count", value: trades, ruleId: "OVERFILTERED_1" });
+    return { failure: "OVERFILTERED", confidence: 0.85, evidence };
+  }
+
+  if (verdict === "FAIL" && Number.isFinite(ciLo) && ciLo < 0) {
+    evidence.push({ metric: "expectancy_ci_lo", value: ciLo, ruleId: "NO_EDGE_1" });
+    return { failure: "NO_EDGE", confidence: 0.85, evidence };
+  }
+
+  if (typeof quickLoserPct === "number" && Number.isFinite(quickLoserPct) && quickLoserPct >= 0.5) {
+    evidence.push({ metric: "quick_loser_pct", value: quickLoserPct, ruleId: "ENTRY_LAG_1" });
+    return { failure: "ENTRY_LAG", confidence: 0.75, evidence };
+  }
+
+  if (typeof durationRatio === "number" && Number.isFinite(durationRatio)) {
+    if (durationRatio > 1.25) {
+      evidence.push({ metric: "duration_ratio", value: durationRatio, ruleId: "EXIT_TOO_LATE_1" });
+      return { failure: "EXIT_TOO_LATE", confidence: 0.7, evidence };
+    }
+    if (durationRatio < 0.8) {
+      evidence.push({ metric: "duration_ratio", value: durationRatio, ruleId: "EXIT_TOO_EARLY_1" });
+      return { failure: "EXIT_TOO_EARLY", confidence: 0.65, evidence };
+    }
+  }
+
+  if (stopLossPct >= 0.5) {
+    evidence.push({ metric: "pct_stoploss_exits", value: stopLossPct, ruleId: "STOP_1" });
+    if (Number.isFinite(maxDd) && maxDd > 0.3) return { failure: "STOP_TOO_WIDE", confidence: 0.65, evidence };
+    return { failure: "STOP_TOO_TIGHT", confidence: 0.65, evidence };
+  }
+
+  return { failure: "NO_EDGE", confidence: 0.6, evidence: [{ metric: "default", value: "no_strong_signal", ruleId: "NO_EDGE_FALLBACK" }] };
+}
+
+function buildAllowedFixes(input: {
+  failure: string;
+  params: any[];
+  attrs: any[];
+}): Array<{ id: string; scope: "entry" | "exit" | "risk"; paramChanges: any[]; attrChanges: any[] }> {
+  const out: Array<{ id: string; scope: "entry" | "exit" | "risk"; paramChanges: any[]; attrChanges: any[] }> = [];
+  const buyParams = input.params.filter((p) => String(p?.space ?? "").toLowerCase() === "buy");
+  const sellParams = input.params.filter((p) => String(p?.space ?? "").toLowerCase() === "sell");
+  const attrByName = new Map<string, any>();
+  for (const a of input.attrs) attrByName.set(String(a?.name ?? ""), a);
+
+  const pickNumericParams = (arr: any[]) =>
+    arr.filter((p) => typeof p?.default === "number" && Number.isFinite(p.default)).slice(0, 6);
+
+  const paramDelta = (p: any, factor: number) => {
+    const from = Number(p.default);
+    let to = from * factor;
+    if (from !== 0) {
+      const delta = Math.abs((to - from) / from);
+      if (delta > 0.3) to = from + Math.sign(to - from) * Math.abs(from) * 0.3;
+    }
+    const lo = Array.isArray(p.args) ? p.args[0] : null;
+    const hi = Array.isArray(p.args) ? p.args[1] : null;
+    if (typeof lo === "number" && typeof hi === "number") to = clampNum(to, lo, hi);
+    if (!Number.isFinite(to) || to === from) return null;
+
+    const before = String(p.before ?? "");
+    if (!before.includes("default")) return null;
+    const after = before.replace(/default\s*=\s*([^,\)]*)/m, `default=${Number.isInteger(to) ? String(Math.trunc(to)) : String(to)}`);
+    return { name: String(p.name), from, to, before, after };
+  };
+
+  const attrDelta = (name: string, factor: number) => {
+    const meta = attrByName.get(name);
+    if (!meta) return null;
+    const from = meta.value;
+    if (typeof from !== "number" || !Number.isFinite(from)) return null;
+    let to = from * factor;
+    if (from !== 0) {
+      const delta = Math.abs((to - from) / from);
+      if (delta > 0.3) to = from + Math.sign(to - from) * Math.abs(from) * 0.3;
+    }
+    if (!Number.isFinite(to) || to === from) return null;
+    const before = String(meta.before ?? "");
+    const after = before.replace(/=\s*([^\n#]+)/, `= ${String(to)}`);
+    return { name, from, to, before, after };
+  };
+
+  if (input.failure === "OVERFILTERED" || input.failure === "ENTRY_LAG") {
+    const changes: any[] = [];
+    for (const p of pickNumericParams(buyParams)) {
+      const lname = String(p.name).toLowerCase();
+      const factor = lname.includes("max") ? 1.1 : lname.includes("min") ? 0.9 : lname.includes("period") || lname.includes("length") ? 0.8 : 0.9;
+      const ch = paramDelta(p, factor);
+      if (ch) changes.push(ch);
+      if (changes.length >= 2) break;
+    }
+    if (changes.length) out.push({ id: `fix_entry_${input.failure.toLowerCase()}`, scope: "entry", paramChanges: changes, attrChanges: [] });
+  }
+
+  if (input.failure === "EXIT_TOO_LATE" || input.failure === "EXIT_TOO_EARLY") {
+    const changes: any[] = [];
+    for (const p of pickNumericParams(sellParams)) {
+      const lname = String(p.name).toLowerCase();
+      const factor = input.failure === "EXIT_TOO_LATE" ? (lname.includes("max") ? 0.9 : 0.9) : 1.1;
+      const ch = paramDelta(p, factor);
+      if (ch) changes.push(ch);
+      if (changes.length >= 2) break;
+    }
+    if (changes.length) out.push({ id: `fix_exit_${input.failure.toLowerCase()}`, scope: "exit", paramChanges: changes, attrChanges: [] });
+  }
+
+  if (input.failure === "STOP_TOO_TIGHT" || input.failure === "STOP_TOO_WIDE") {
+    const factor = input.failure === "STOP_TOO_TIGHT" ? 1.2 : 0.8;
+    const ch = attrDelta("stoploss", factor);
+    if (ch) out.push({ id: `fix_risk_${input.failure.toLowerCase()}`, scope: "risk", paramChanges: [], attrChanges: [ch] });
+  }
+
+  return out.slice(0, 5);
+}
+
+async function runDiagnosticLoopRun(runId: string) {
+  const run = await storage.getDiagnosticLoopRun(runId);
+  if (!run) return;
+
+  if (diagnosticLoopStopRequests.has(runId)) {
+    diagnosticLoopStopRequests.delete(runId);
+    await storage.updateDiagnosticLoopRun(runId, { status: "stopped", stopReason: "stop_requested", finishedAt: new Date() } as any);
+    return;
+  }
+
+  const baseConfig = run.baseConfig && typeof run.baseConfig === "object" ? run.baseConfig : {};
+  const maxIterations = clampNum((baseConfig as any)?.maxIterations ?? 3, 1, 3);
+  const drawdownCap = clampNum((baseConfig as any)?.drawdownCap ?? 0.2, 0, 1);
+  const model = String((baseConfig as any)?.model ?? "meta-llama/llama-3-8b-instruct:free");
+
+  await storage.updateDiagnosticLoopRun(runId, {
+    status: "running",
+    startedAt: new Date(),
+    progress: { percent: 0, iteration: 0, stage: "start", timeframe: "", step: "start" } as DiagnosticLoopProgress,
+  } as any);
+
+  const projectRoot = process.cwd();
+  const strategyPath = String(run.strategyPath);
+
+  const versionsDir = path.join(projectRoot, "user_data", "strategies", "versions");
+  await fs.mkdir(versionsDir, { recursive: true });
+
+  const readStrategy = async () => {
+    const abs = resolvePathWithinProject(strategyPath);
+    return await fs.readFile(abs, "utf-8");
+  };
+
+  const snapshotPathForIter = async (iteration: number) => {
+    const base = path.basename(strategyPath);
+    const content = await readStrategy();
+    const p = path.join(versionsDir, `${base}.${runId}.iter${iteration}.py`);
+    await fs.writeFile(p, content, "utf-8");
+    return p;
+  };
+
+  const restoreSnapshot = async (p: string) => {
+    const abs = resolvePathWithinProject(strategyPath);
+    const content = await fs.readFile(p, "utf-8");
+    await fs.writeFile(abs, content, "utf-8");
+    await storage.syncWithFilesystem();
+  };
+
+  const makeBacktestInput = (timeframe: string) => {
+    const cfg = (baseConfig as any)?.config && typeof (baseConfig as any).config === "object" ? (baseConfig as any).config : baseConfig;
+    const next = cfg && typeof cfg === "object" ? JSON.parse(JSON.stringify(cfg)) : {};
+    next.timeframe = timeframe;
+    if (typeof (baseConfig as any)?.timerange === "string" && String((baseConfig as any).timerange).trim()) {
+      next.timerange = String((baseConfig as any).timerange);
+    }
+    if (Array.isArray((baseConfig as any)?.pairs) && (baseConfig as any).pairs.length) {
+      next.pairs = (baseConfig as any).pairs;
+    }
+    if (typeof next.timerange !== "string" || !next.timerange.trim()) {
+      next.timerange = buildTimerange(next.backtest_date_from, next.backtest_date_to);
+    }
+    return { strategyName: strategyPath, config: next };
+  };
+
+  const startBacktest = async (timeframe: string) => {
+    const input = makeBacktestInput(timeframe);
+    const backtest = await storage.createBacktest(input as any);
+
+    try {
+      const runDir = path.join(projectRoot, "user_data", "backtest_results", "runs", String(backtest.id));
+      await fs.mkdir(runDir, { recursive: true });
+      const strategyAbs = resolvePathWithinProject(String(input.strategyName || ""));
+      const configAbs = path.join(projectRoot, "user_data", "config.json");
+      const [strategyContent, configContent] = await Promise.all([
+        fs.readFile(strategyAbs, "utf-8"),
+        fs.readFile(configAbs, "utf-8"),
+      ]);
+      const snapshot = {
+        version: 1,
+        createdAt: new Date().toISOString(),
+        backtestId: backtest.id,
+        strategyPath: String(input.strategyName || ""),
+        strategyContent,
+        configPath: "user_data/config.json",
+        configContent,
+        runInput: input,
+      };
+      await fs.writeFile(path.join(runDir, "snapshot.json"), JSON.stringify(snapshot, null, 2), "utf-8");
+    } catch {
+    }
+
+    runActualBacktest(backtest.id, input);
+    return backtest.id;
+  };
+
+  const waitBacktest = async (backtestId: number, timeoutMs: number) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const bt = await storage.getBacktest(backtestId);
+      if (bt?.status === "completed" || bt?.status === "failed") return bt;
+      if (diagnosticLoopStopRequests.has(runId)) return bt;
+      await sleep(1000);
+    }
+    return await storage.getBacktest(backtestId);
+  };
+
+  const extractFeaturesAndPhases = async (backtestId: number, strategyContent: string) => {
+    const parser = new BacktestParser();
+    const summaryPath = path.join(projectRoot, "user_data", "backtest_results", `backtest-result-${backtestId}.json`);
+    let btData: any = null;
+    try {
+      const raw = await fs.readFile(summaryPath, "utf-8");
+      btData = JSON.parse(raw);
+    } catch {
+      btData = null;
+    }
+    if (!btData) {
+      btData = parser.parse(String(backtestId));
+    }
+    if (!btData) throw new Error("Backtest results not found");
+
+    const phase1 = new Phase1Structural();
+    const structural = await phase1.analyze(btData, strategyContent, { backtestId });
+
+    const phase2 = new Phase2Performance();
+    const perf = phase2.analyze(btData);
+    const phase3 = new Phase3Drawdown();
+    const dd = phase3.analyze(btData);
+    const phase4 = new Phase4EntryQuality();
+    const entry = phase4.analyze(btData);
+    const phase5 = new Phase5Exit();
+    const exit = phase5.analyze(btData);
+    const phase6 = new Phase6Regime();
+    const regime = await phase6.analyze(btData);
+    const phase7 = new Phase7Costs();
+    const costs = await phase7.analyze(btData);
+    const phase8 = new Phase8Logic();
+    const logic = phase8.analyze(strategyContent);
+    const phase9 = new Phase9Statistics();
+    const stats = phase9.analyze(btData);
+
+    const stratKey = btData?.strategy && typeof btData.strategy === "object" ? Object.keys(btData.strategy)[0] : null;
+    const strat = stratKey ? btData.strategy[stratKey] : null;
+    const profitTotal = Number((btData as any)?.profit_total ?? strat?.profit_total ?? (btData as any)?.profitTotal ?? 0);
+    const maxDrawdown = Number((btData as any)?.max_drawdown ?? (btData as any)?.maxDrawdown ?? strat?.max_drawdown_account ?? strat?.max_drawdown ?? 0);
+    const phase9Verdict = String(stats?.sampleAdequacy?.verdict ?? "FAIL");
+
+    const edgeReasons: string[] = [];
+    if (!(profitTotal > 0)) edgeReasons.push("profit_total_not_positive");
+    if (phase9Verdict !== "PASS") edgeReasons.push("phase9_not_pass");
+    if (!(maxDrawdown <= drawdownCap)) edgeReasons.push("drawdown_above_cap");
+    if (profitTotal > 0 && costs?.costSensitivity && costs.costSensitivity.edgeViable === false) edgeReasons.push("edge_not_viable_after_cost_stress");
+
+    const features = {
+      global: {
+        net_profit: profitTotal,
+        max_drawdown: maxDrawdown,
+        sharpe: null,
+        expectancy: Number(perf?.expectancy?.expectancy ?? 0),
+        trade_count: Number(perf?.expectancy?.totals?.totalTrades ?? 0),
+      },
+      trade_behavior: {
+        avg_trade_duration_min: null,
+        pct_stoploss_exits: null,
+        pct_roi_exits: null,
+        avg_ma_distance_at_entry: null,
+        mae_mfe: null,
+      },
+      market_context: {
+        volatility_bucket: "unknown",
+        trend_direction: "unknown",
+        volume_percentile: null,
+      },
+      cost_stress: {
+        profit_after_stress: Number(costs?.costSensitivity?.combinedStress ?? profitTotal),
+        edge_viable_after_stress: Boolean(costs?.costSensitivity?.edgeViable),
+      },
+    };
+
+    const edgeOk = edgeReasons.length === 0;
+
+    return {
+      features,
+      phases: { structural, perf, dd, entry, exit, regime, costs, logic, stats },
+      edge: { ok: edgeOk, reasons: edgeReasons, profitTotal, maxDrawdown, phase9Verdict },
+    };
+  };
+
+  const runReport: any = {
+    runId,
+    strategyPath,
+    maxIterations,
+    drawdownCap,
+    model,
+    iterations: [],
+    outcome: "",
+    stopReason: "",
+  };
+
+  let lastPhases: any = null;
+  const buildSummary = (phases: any) => {
+    try {
+      if (!phases) return null;
+      const phase10 = new Phase10Report();
+      const phase11 = new Phase11Signals();
+      const input = {
+        phase1: { structuralIntegrity: phases.structural },
+        phase2: { performance: phases.perf },
+        phase3: { drawdownRisk: phases.dd },
+        phase4: { entryQuality: phases.entry },
+        phase5: { exitLogic: phases.exit },
+        phase6: { regimeAnalysis: phases.regime },
+        phase7: { costAnalysis: phases.costs },
+        phase8: { logicIntegrity: phases.logic },
+        phase9: { statistics: phases.stats },
+      };
+      return {
+        summary: phase10.analyze(input),
+        signals: phase11.analyze(input),
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  try {
+    for (let iteration = 1; iteration <= maxIterations; iteration++) {
+      if (diagnosticLoopStopRequests.has(runId)) {
+        diagnosticLoopStopRequests.delete(runId);
+        await storage.updateDiagnosticLoopRun(runId, { status: "stopped", stopReason: "stop_requested", finishedAt: new Date(), report: runReport } as any);
+        return;
+      }
+
+      await storage.updateDiagnosticLoopRun(runId, {
+        progress: { percent: Math.round(((iteration - 1) / maxIterations) * 100), iteration, stage: "baseline", timeframe: "", step: "start" } as DiagnosticLoopProgress,
+      } as any);
+
+      const snapshotPath = await snapshotPathForIter(iteration);
+      const strategyContent = await readStrategy();
+
+      const baseline: any = {};
+      for (const timeframe of ["5m", "15m"]) {
+        await storage.updateDiagnosticLoopRun(runId, {
+          progress: { percent: 0, iteration, stage: "baseline", timeframe, step: "backtest" } as DiagnosticLoopProgress,
+        } as any);
+
+        const backtestId = await startBacktest(timeframe);
+        const bt = await waitBacktest(backtestId, 1000 * 60 * 30);
+        if (!bt) {
+          runReport.outcome = "FAIL";
+          runReport.stopReason = "backtest_missing";
+          runReport.backtestError = { iteration, timeframe, backtestId, message: "Backtest record missing" };
+          await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+          return;
+        }
+        if (bt.status !== "completed") {
+          const info = backtestFailureInfo(bt);
+          const stopReason = bt.status === "running" ? "backtest_timeout" : "backtest_failed";
+          runReport.outcome = "FAIL";
+          runReport.stopReason = stopReason;
+          runReport.backtestError = { iteration, timeframe, backtestId, ...info };
+
+          await storage.createDiagnosticLoopIteration({
+            runId,
+            iteration,
+            stage: "baseline",
+            timeframe,
+            backtestId,
+            failure: "BACKTEST_FAILED",
+            confidence: 1,
+            validation: { ok: false, stopReason, error: info },
+          } as any);
+
+          await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+          return;
+        }
+
+        const extracted = await extractFeaturesAndPhases(backtestId, strategyContent);
+
+        if (String(extracted?.phases?.structural?.verdict || "").toUpperCase() === "FAIL") {
+          runReport.outcome = "FAIL";
+          runReport.stopReason = "structural_fail";
+          runReport.summary = buildSummary(extracted.phases);
+          await storage.createDiagnosticLoopIteration({
+            runId,
+            iteration,
+            stage: "baseline",
+            timeframe,
+            backtestId,
+            features: extracted.features,
+            failure: "STRUCTURAL_FAIL",
+            confidence: 1,
+            validation: { structural: extracted.phases.structural },
+          } as any);
+          await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+          return;
+        }
+        const row = await storage.createDiagnosticLoopIteration({
+          runId,
+          iteration,
+          stage: "baseline",
+          timeframe,
+          backtestId,
+          features: extracted.features,
+          validation: { edge: extracted.edge },
+        } as any);
+
+        baseline[timeframe] = { row, extracted };
+
+        if (extracted.edge.ok) {
+          runReport.outcome = "SUCCESS";
+          runReport.stopReason = `edge_detected_${timeframe}`;
+          runReport.iterations.push({ iteration, success: true, timeframe, edge: extracted.edge });
+          await storage.updateDiagnosticLoopRun(runId, { status: "completed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+          return;
+        }
+      }
+
+      const primaryTf = "5m";
+      const primary = baseline[primaryTf]?.extracted;
+      if (!primary) throw new Error("Missing baseline features");
+
+      const classification = classifyLoopFailure({
+        perf: primary.phases.perf,
+        entry: primary.phases.entry,
+        exit: primary.phases.exit,
+        drawdown: primary.phases.dd,
+        stats: primary.phases.stats,
+      });
+
+      lastPhases = primary.phases;
+
+      const baselineRowId = Number(baseline[primaryTf].row.id);
+      await storage.updateDiagnosticLoopIteration(baselineRowId, {
+        failure: classification.failure,
+        confidence: classification.confidence,
+      } as any);
+
+      runReport.iterations.push({
+        iteration,
+        primaryTimeframe: primaryTf,
+        failure: classification.failure,
+        confidence: classification.confidence,
+        evidence: classification.evidence,
+        baselineEdge: primary.edge,
+      });
+
+      if (classification.confidence < 0.6 || classification.failure === "NO_EDGE") {
+        runReport.outcome = "FAIL";
+        runReport.stopReason = classification.failure === "NO_EDGE" ? "no_edge_detected" : "low_confidence";
+        runReport.summary = buildSummary(lastPhases);
+        await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+        return;
+      }
+
+      await storage.updateDiagnosticLoopRun(runId, {
+        progress: { percent: 0, iteration, stage: "propose", timeframe: primaryTf, step: "extract_params" } as DiagnosticLoopProgress,
+      } as any);
+
+      const params = await extractStrategyParams(strategyPath);
+      const attrs = await extractStrategyAttrs(strategyPath);
+      const fixes = buildAllowedFixes({ failure: classification.failure, params, attrs });
+      if (!fixes.length) {
+        runReport.outcome = "FAIL";
+        runReport.stopReason = "no_allowed_fixes";
+        runReport.summary = buildSummary(lastPhases);
+        await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+        return;
+      }
+
+      const aiChoice = await chooseDiagnosticLoopFixWithAi({
+        model,
+        features: primary.features,
+        failure: classification.failure,
+        confidence: classification.confidence,
+        evidence: classification.evidence,
+        allowedFixes: fixes,
+      });
+
+      const selected = aiChoice?.selectedFixId ? (fixes.find((f) => f.id === aiChoice.selectedFixId) ?? fixes[0]) : fixes[0];
+      const proposedChanges = {
+        selectedFixId: selected.id,
+        ai: aiChoice,
+        scope: selected.scope,
+        paramChanges: selected.paramChanges,
+        attrChanges: selected.attrChanges,
+      };
+
+      await storage.updateDiagnosticLoopIteration(baselineRowId, { proposedChanges } as any);
+
+      await storage.updateDiagnosticLoopRun(runId, {
+        progress: { percent: 0, iteration, stage: "apply", timeframe: primaryTf, step: "apply_changes" } as DiagnosticLoopProgress,
+      } as any);
+
+      const beforeStrategy = await readStrategy();
+
+      if (Array.isArray(selected.paramChanges) && selected.paramChanges.length) {
+        const changes = selected.paramChanges.slice(0, 3).map((c: any) => ({ name: c.name, before: c.before, after: c.after }));
+        await applyStrategyParamChanges(strategyPath, changes);
+      }
+      if (Array.isArray(selected.attrChanges) && selected.attrChanges.length) {
+        const changes = selected.attrChanges.slice(0, 3).map((c: any) => ({ name: c.name, before: c.before, after: c.after }));
+        await applyStrategyAttrChanges(strategyPath, changes);
+      }
+
+      await storage.syncWithFilesystem();
+      const afterStrategy = await readStrategy();
+      const appliedDiff = simpleDiffText(beforeStrategy, afterStrategy);
+      await storage.updateDiagnosticLoopIteration(baselineRowId, { appliedDiff } as any);
+
+      await storage.updateDiagnosticLoopRun(runId, {
+        progress: { percent: 0, iteration, stage: "validation", timeframe: "", step: "backtest" } as DiagnosticLoopProgress,
+      } as any);
+
+      let validationOk = true;
+      let edgeDetected: any = null;
+
+      for (const timeframe of ["5m", "15m"]) {
+        const backtestId = await startBacktest(timeframe);
+        const bt = await waitBacktest(backtestId, 1000 * 60 * 30);
+        if (!bt || bt.status !== "completed") {
+          validationOk = false;
+          const info = backtestFailureInfo(bt);
+          await storage.createDiagnosticLoopIteration({
+            runId,
+            iteration,
+            stage: "validation",
+            timeframe,
+            backtestId,
+            failure: "BACKTEST_FAILED",
+            confidence: 1,
+            validation: { ok: false, stopReason: "backtest_failed", error: info },
+          } as any);
+          break;
+        }
+        const extracted = await extractFeaturesAndPhases(backtestId, afterStrategy);
+
+        await storage.createDiagnosticLoopIteration({
+          runId,
+          iteration,
+          stage: "validation",
+          timeframe,
+          backtestId,
+          features: extracted.features,
+          validation: { edge: extracted.edge },
+        } as any);
+
+        const baselineDd = Number(baseline[timeframe]?.extracted?.edge?.maxDrawdown ?? NaN);
+        if (Number.isFinite(baselineDd) && extracted.edge.maxDrawdown > baselineDd + 1e-6) {
+          validationOk = false;
+        }
+        if (extracted.edge.ok) edgeDetected = { timeframe, edge: extracted.edge };
+      }
+
+      if (!validationOk) {
+        await restoreSnapshot(snapshotPath);
+        await storage.updateDiagnosticLoopIteration(baselineRowId, { validation: { ok: false, reason: "validation_failed_or_drawdown_increased" } } as any);
+        runReport.outcome = "FAIL";
+        runReport.stopReason = "validation_failed";
+        runReport.summary = buildSummary(lastPhases);
+        await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+        return;
+      }
+
+      await storage.updateDiagnosticLoopIteration(baselineRowId, { validation: { ok: true } } as any);
+
+      if (edgeDetected) {
+        runReport.outcome = "SUCCESS";
+        runReport.stopReason = `edge_detected_${edgeDetected.timeframe}`;
+        await storage.updateDiagnosticLoopRun(runId, { status: "completed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+        return;
+      }
+    }
+
+    runReport.outcome = "FAIL";
+    runReport.stopReason = "max_iterations_reached";
+    runReport.summary = buildSummary(lastPhases);
+    await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
+  } catch (err: any) {
+    runReport.outcome = "FAIL";
+    runReport.stopReason = "internal_error";
+    runReport.error = String(err?.message || err);
+    await storage.updateDiagnosticLoopRun(runId, { status: "failed", stopReason: runReport.stopReason, finishedAt: new Date(), report: runReport } as any);
   }
 }
 
@@ -49,6 +863,29 @@ async function processDiagnosticQueue() {
     }
   } finally {
     diagnosticWorkerRunning = false;
+  }
+}
+
+async function enqueueDiagnosticLoopRun(runId: string) {
+  diagnosticLoopQueue.push(runId);
+  if (!diagnosticLoopWorkerRunning) {
+    processDiagnosticLoopQueue().catch((err) => {
+      console.error("Diagnostic loop queue error:", err);
+    });
+  }
+}
+
+async function processDiagnosticLoopQueue() {
+  if (diagnosticLoopWorkerRunning) return;
+  diagnosticLoopWorkerRunning = true;
+  try {
+    while (diagnosticLoopQueue.length > 0) {
+      const runId = diagnosticLoopQueue.shift();
+      if (!runId) continue;
+      await runDiagnosticLoopRun(runId);
+    }
+  } finally {
+    diagnosticLoopWorkerRunning = false;
   }
 }
 
@@ -1412,6 +2249,89 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
     res.json(reports);
   });
 
+  // === Diagnostic Loop Endpoints ===
+  app.post(api.diagnosticLoop.start.path, async (req, res) => {
+    try {
+      const input = api.diagnosticLoop.start.input.parse(req.body);
+      const { strategyPath } = input;
+
+      if (!strategyPath.startsWith("user_data/strategies/")) {
+        return res.status(400).json({ message: "strategyPath must be under user_data/strategies/" });
+      }
+
+      resolvePathWithinProject(strategyPath);
+
+      const runId = uuidv4();
+      const baseConfig = {
+        ...(input.baseConfig && typeof input.baseConfig === "object" ? input.baseConfig : {}),
+        ...(typeof input.timerange === "string" ? { timerange: input.timerange } : {}),
+        ...(Array.isArray(input.pairs) ? { pairs: input.pairs } : {}),
+        ...(typeof input.maxIterations === "number" ? { maxIterations: input.maxIterations } : {}),
+        ...(typeof input.drawdownCap === "number" ? { drawdownCap: input.drawdownCap } : {}),
+      };
+
+      await storage.createDiagnosticLoopRun({
+        id: runId,
+        strategyPath,
+        baseConfig,
+        status: "queued",
+        progress: { percent: 0, iteration: 0, stage: "queued", timeframe: "", step: "queued" } as DiagnosticLoopProgress,
+      } as any);
+
+      enqueueDiagnosticLoopRun(runId).catch(() => {});
+      res.status(202).json({ runId, status: "queued" });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0]?.message || "Invalid request" });
+      }
+      res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get(api.diagnosticLoop.runs.path, async (req, res) => {
+    const runs = await storage.getDiagnosticLoopRuns();
+    res.json(runs);
+  });
+
+  app.get(api.diagnosticLoop.run.path, async (req, res) => {
+    const runId = String(req.params.runId);
+    const run = await storage.getDiagnosticLoopRun(runId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+    const iterations = await storage.getDiagnosticLoopIterations(runId);
+    res.json({ ...run, iterations });
+  });
+
+  app.post(api.diagnosticLoop.stop.path, async (req, res) => {
+    const runId = String(req.params.runId);
+    const run = await storage.getDiagnosticLoopRun(runId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+
+    diagnosticLoopStopRequests.add(runId);
+
+    if (run.status === "queued") {
+      await storage.updateDiagnosticLoopRun(runId, {
+        status: "stopped",
+        stopReason: "stop_requested",
+        finishedAt: new Date(),
+        progress: { percent: 100, iteration: 0, stage: "stopped", timeframe: "", step: "stop_requested" } as DiagnosticLoopProgress,
+      } as any);
+    } else {
+      await storage.updateDiagnosticLoopRun(runId, {
+        progress: { ...(run.progress as any), step: "stop_requested" } as any,
+      } as any);
+    }
+
+    res.json({ success: true });
+  });
+
+  app.get(api.diagnosticLoop.report.path, async (req, res) => {
+    const runId = String(req.params.runId);
+    const run = await storage.getDiagnosticLoopRun(runId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+    if (!run.report) return res.status(404).json({ message: "Report not ready" });
+    res.json(run.report);
+  });
+
   // === Chat Persistence ===
   app.get("/api/chat/sessions", async (req, res) => {
     const sessionKey = typeof req.query.sessionKey === "string" ? req.query.sessionKey : "";
@@ -1680,6 +2600,255 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
   });
 
   // === Download Data Endpoint ===
+  app.get("/api/pairs/top-volume", async (req, res) => {
+    try {
+      const input = z
+        .object({
+          limit: z.string().optional(),
+          quote: z.string().optional(),
+        })
+        .parse(req.query);
+
+      const limit = clampNum(input.limit ? Number(input.limit) : 10, 1, 50);
+      const quote = (typeof input.quote === "string" && input.quote.trim() ? input.quote.trim().toUpperCase() : "USDT");
+
+      const now = Date.now();
+      const cacheMs = 60_000;
+      if (!cachedBinance24hTickers || now - cachedBinance24hTickersAt > cacheMs) {
+        const upstream = await fetch("https://api.binance.com/api/v3/ticker/24hr", { method: "GET" });
+        if (!upstream.ok) {
+          throw new Error(`Binance ticker request failed (${upstream.status})`);
+        }
+        const json = await upstream.json();
+        cachedBinance24hTickers = Array.isArray(json) ? json : [];
+        cachedBinance24hTickersAt = now;
+      }
+
+      const stableBases = new Set([
+        "USDT",
+        "USDC",
+        "BUSD",
+        "TUSD",
+        "FDUSD",
+        "DAI",
+        "EUR",
+        "GBP",
+        "TRY",
+        "BRL",
+        "RUB",
+      ]);
+
+      const badSuffixes = ["UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S"];
+
+      const candidates = (cachedBinance24hTickers || [])
+        .map((t: any) => {
+          const symbol = String(t?.symbol || "").toUpperCase();
+          const qv = Number(t?.quoteVolume);
+          return { symbol, quoteVolume: Number.isFinite(qv) ? qv : 0 };
+        })
+        .filter((t: any) => t.symbol.endsWith(quote))
+        .map((t: any) => {
+          const base = t.symbol.slice(0, Math.max(0, t.symbol.length - quote.length));
+          return { base, quote, symbol: t.symbol, quoteVolume: t.quoteVolume };
+        })
+        .filter((t: any) => t.base && !stableBases.has(t.base))
+        .filter((t: any) => !badSuffixes.some((s) => t.base.endsWith(s)))
+        .filter((t: any) => t.quoteVolume > 0);
+
+      candidates.sort((a: any, b: any) => b.quoteVolume - a.quoteVolume);
+
+      const top = candidates.slice(0, limit).map((t: any) => ({
+        pair: `${t.base}/${t.quote}`,
+        quoteVolume: t.quoteVolume,
+        symbol: t.symbol,
+      }));
+
+      res.json({
+        exchange: "binance",
+        quote,
+        limit,
+        pairs: top.map((x: any) => x.pair),
+        items: top,
+      });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ message });
+    }
+  });
+
+  app.post("/api/data/coverage", async (req, res) => {
+    try {
+      const input = z
+        .object({
+          pairs: z.array(z.string()).min(1),
+          timeframes: z.array(z.string()).min(1),
+          date_from: z.string().optional(),
+          date_to: z.string().optional(),
+          timerange: z.string().optional(),
+        })
+        .parse(req.body);
+
+      const projectRoot = process.cwd();
+
+      let exchangeName = "binance";
+      try {
+        const rawCfg = await fs.readFile(path.join(projectRoot, "user_data", "config.json"), "utf-8");
+        const parsed = JSON.parse(rawCfg);
+        const ex = parsed?.exchange?.name;
+        if (typeof ex === "string" && ex.trim().length > 0) {
+          exchangeName = ex.trim();
+        }
+      } catch {
+        // ignore
+      }
+
+      const normalizePairToFilename = (pair: string) =>
+        String(pair || "")
+          .trim()
+          .replace("/", "_")
+          .replace(":", "_");
+
+      const parseDateToMs = (s: string | undefined) => {
+        if (!s) return null;
+        const str = String(s).trim();
+        if (!str) return null;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+          const d = new Date(`${str}T00:00:00Z`);
+          return Number.isFinite(d.getTime()) ? d.getTime() : null;
+        }
+        if (/^\d{8}$/.test(str)) {
+          const d = new Date(`${str.slice(0, 4)}-${str.slice(4, 6)}-${str.slice(6, 8)}T00:00:00Z`);
+          return Number.isFinite(d.getTime()) ? d.getTime() : null;
+        }
+        return null;
+      };
+
+      const timerange = typeof input.timerange === "string" && input.timerange.trim() ? input.timerange.trim() : "";
+      const timerangeMatch = timerange.match(/^(\d{8})-(\d{8})$/);
+      const requestedFromMs = timerangeMatch ? parseDateToMs(timerangeMatch[1]) : parseDateToMs(input.date_from);
+      const requestedToMs = timerangeMatch ? parseDateToMs(timerangeMatch[2]) : parseDateToMs(input.date_to);
+
+      const readCandleTsRange = async (filePath: string): Promise<{ firstMs: number; lastMs: number } | null> => {
+        try {
+          const st = await fs.stat(filePath);
+          if (!Number.isFinite(st.size) || st.size <= 0) return null;
+
+          const fh = await fs.open(filePath, "r");
+          try {
+            const headSize = Math.min(4096, st.size);
+            const tailSize = Math.min(16384, st.size);
+
+            const headBuf = Buffer.alloc(headSize);
+            await fh.read(headBuf, 0, headSize, 0);
+            const headTxt = headBuf.toString("utf-8");
+            const headM = headTxt.match(/\[\s*\[\s*([0-9]{9,})\s*,/);
+            const firstRaw = headM ? Number(headM[1]) : NaN;
+
+            const tailBuf = Buffer.alloc(tailSize);
+            await fh.read(tailBuf, 0, tailSize, Math.max(0, st.size - tailSize));
+            const tailTxt = tailBuf.toString("utf-8");
+            const re = /\[\s*([0-9]{9,})\s*,/g;
+            let lastRaw = NaN;
+            let mm: RegExpExecArray | null;
+            while ((mm = re.exec(tailTxt)) !== null) {
+              const n = Number(mm[1]);
+              if (Number.isFinite(n)) lastRaw = n;
+            }
+
+            if (!Number.isFinite(firstRaw) || !Number.isFinite(lastRaw)) return null;
+
+            const toMs = (v: number) => (v < 1e11 ? v * 1000 : v);
+            return { firstMs: toMs(firstRaw), lastMs: toMs(lastRaw) };
+          } finally {
+            await fh.close();
+          }
+        } catch {
+          return null;
+        }
+      };
+
+      const dataDir = path.join(projectRoot, "user_data", "data", exchangeName);
+
+      const items: Array<any> = [];
+
+      for (const pair of input.pairs) {
+        const base = normalizePairToFilename(pair);
+        for (const tf of input.timeframes) {
+          const timeframe = String(tf || "").trim();
+          const jsonPath = path.join(dataDir, `${base}-${timeframe}.json`);
+          const featherPath = path.join(dataDir, `${base}-${timeframe}.feather`);
+
+          const existsJson = await fs.access(jsonPath).then(() => true).catch(() => false);
+          const existsFeather = !existsJson ? await fs.access(featherPath).then(() => true).catch(() => false) : false;
+          const exists = existsJson || existsFeather;
+
+          let firstDate: string | null = null;
+          let lastDate: string | null = null;
+          let coversRequested: boolean | null = null;
+
+          if (existsJson) {
+            const range = await readCandleTsRange(jsonPath);
+            if (range) {
+              firstDate = new Date(range.firstMs).toISOString().slice(0, 10);
+              lastDate = new Date(range.lastMs).toISOString().slice(0, 10);
+
+              if (requestedFromMs != null || requestedToMs != null) {
+                const okFrom = requestedFromMs == null ? true : range.firstMs <= requestedFromMs;
+                const okTo = requestedToMs == null ? true : range.lastMs >= requestedToMs;
+                coversRequested = okFrom && okTo;
+              }
+            }
+          }
+
+          items.push({
+            pair: String(pair),
+            timeframe,
+            exists,
+            file: existsJson ? path.relative(projectRoot, jsonPath) : existsFeather ? path.relative(projectRoot, featherPath) : null,
+            firstDate,
+            lastDate,
+            coversRequested,
+          });
+        }
+      }
+
+      const summary: any = { byTimeframe: {} as Record<string, any> };
+      for (const tf of input.timeframes) {
+        const timeframe = String(tf || "").trim();
+        const sub = items.filter((x) => String(x.timeframe) === timeframe);
+        const exists = sub.filter((x) => Boolean(x.exists));
+        const missing = sub.filter((x) => !x.exists);
+        const partial = sub.filter((x) => x.exists && x.coversRequested === false);
+        summary.byTimeframe[timeframe] = {
+          totalPairs: sub.length,
+          availablePairs: exists.length,
+          missingPairs: missing.length,
+          outOfRangePairs: partial.length,
+        };
+      }
+
+      res.json({
+        exchange: exchangeName,
+        requested: {
+          timerange: timerange || null,
+          date_from: input.date_from ?? null,
+          date_to: input.date_to ?? null,
+        },
+        items,
+        summary,
+      });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0].message });
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ message });
+    }
+  });
+
   app.post("/api/data/download", async (req, res) => {
     try {
       const input = z.object({

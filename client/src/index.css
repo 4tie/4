@@ -121,6 +121,58 @@
   --sidebar-ring: 216 34% 17%;
 }
 
+.neo-world {
+  --background: 250 60% 4%;
+  --foreground: 220 18% 92%;
+
+  --workspace-safe-bottom: max(env(safe-area-inset-bottom), 0px);
+
+  --card: 255 55% 6%;
+  --card-foreground: 220 18% 92%;
+  --card-border: 270 40% 18%;
+
+  --popover: 255 55% 6%;
+  --popover-foreground: 220 18% 92%;
+  --popover-border: 270 40% 18%;
+
+  --primary: 272 92% 62%;
+  --primary-foreground: 0 0% 100%;
+  --primary-border: 272 92% 52%;
+
+  --secondary: 260 40% 10%;
+  --secondary-foreground: 220 18% 92%;
+  --secondary-border: 270 35% 18%;
+
+  --muted: 260 40% 10%;
+  --muted-foreground: 220 10% 62%;
+  --muted-border: 270 35% 18%;
+
+  --accent: 260 40% 10%;
+  --accent-foreground: 220 18% 92%;
+  --accent-border: 270 35% 18%;
+
+  --destructive: 0 84% 56%;
+  --destructive-foreground: 0 0% 100%;
+  --destructive-border: 0 84% 46%;
+
+  --border: 270 35% 18%;
+  --input: 270 35% 18%;
+  --ring: 272 92% 62%;
+
+  --sidebar: 250 60% 4%;
+  --sidebar-foreground: 220 18% 92%;
+  --sidebar-primary: 272 92% 62%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 260 40% 10%;
+  --sidebar-accent-foreground: 220 18% 92%;
+  --sidebar-border: 270 35% 18%;
+  --sidebar-ring: 272 92% 62%;
+
+  --gradient-start: 272 92% 62%;
+  --gradient-mid: 0 84% 56%;
+  --gradient-end: 315 85% 60%;
+}
+
 @layer base {
   body {
     @apply bg-background text-foreground font-sans antialiased overflow-hidden;

@@ -10,6 +10,7 @@ import { ChatPanel, ChatToggleButton } from "@/components/ChatPanel";
 import { BacktestResults } from "@/components/BacktestResults";
 import { StrategyParamsDialog } from "@/components/StrategyParamsDialog";
 import { DiagnosticsPage } from "@/pages/Diagnostics";
+import { DiagnosticLoopPage } from "@/pages/DiagnosticLoop";
 import { useFile, useUpdateFile } from "@/hooks/use-files";
 import { useBacktest, useBacktests } from "@/hooks/use-backtests";
 import { useUpdateConfig } from "@/hooks/use-config";
@@ -20,11 +21,13 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import type { ImperativePanelHandle } from "react-resizable-panels";
 import { api } from "@shared/routes";
+import { useLocation } from "wouter";
 
-type ViewMode = "ide" | "backtest" | "results" | "comparison" | "diagnostics";
+type ViewMode = "ide" | "backtest" | "results" | "comparison" | "diagnostics" | "diagnosticLoop";
 
 export default function Home() {
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
   const [viewMode, setViewMode] = useState<ViewMode>("ide");
   const [activeSidebarTab, setActiveSidebarTab] = useState<"explorer" | "backtests">("explorer");
   const [activeFileId, setActiveFileId] = useState<number | null>(null);
@@ -318,6 +321,22 @@ export default function Home() {
                     Diagnostics
                   </Button>
             )}
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "h-8 px-3 text-xs gap-2 transition-all duration-200",
+                viewMode === "diagnosticLoop" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => {
+                setViewMode("diagnosticLoop");
+                setShowBacktestDashboard(false);
+              }}
+            >
+              <Zap className="w-3.5 h-3.5" />
+              Diagnostic Loop
+            </Button>
           </nav>
         </div>
         
@@ -371,6 +390,23 @@ export default function Home() {
               )} />
             </div>
           </div>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 px-3 text-xs gap-2"
+            onClick={() => {
+              if (isDirty) {
+                const ok = confirm("You have unsaved changes. Leave anyway?");
+                if (!ok) return;
+              }
+              navigate("/workspace");
+            }}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            Workspace
+          </Button>
 
           <ChatToggleButton isOpen={chatOpen} onToggle={() => setChatOpenAndResize(!chatOpen)} />
         </div>
@@ -584,6 +620,8 @@ export default function Home() {
                     onPlacementChange={setDiagnosticsPlacement}
                     onOpenChat={() => setChatOpenAndResize(true)}
                   />
+                ) : viewMode === "diagnosticLoop" ? (
+                  <DiagnosticLoopPage selectedStrategyPath={selectedStrategyName} />
                 ) : (
                   <div className="h-full flex flex-col">
                     <div className="h-10 border-b border-border bg-background flex items-center px-4">
