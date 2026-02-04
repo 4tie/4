@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { DiffEditor } from "@monaco-editor/react";
-import { Bot, Check, ChevronDown, ChevronLeft, FileCode, GitCompare, Loader2, Play, Save, Search, Wifi, WifiOff } from "lucide-react";
+import { BarChart3, Bot, Check, ChevronDown, ChevronLeft, FileCode, GitCompare, Loader2, Play, Save, Search, Wifi, WifiOff } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +35,7 @@ type DiffState = {
 };
 
 const WORKSPACE_QUICK_BACKTEST_KEY = "workspace:quickBacktest";
+const WORKSPACE_TRADES_COL_WIDTHS_KEY = "workspace:tradesTableColWidths";
 
 const AVAILABLE_PAIRS = [
   "BTC/USDT",
@@ -92,6 +93,39 @@ function timerangeYtdUtc(): string {
   const now = new Date();
   const from = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
   return `${fmtTimerangePartUtc(from)}-${fmtTimerangePartUtc(now)}`;
+}
+
+function toFiniteNumber(v: any): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function fmtPct(v: number | null, digits = 2): string {
+  if (v == null) return "-";
+  return `${v.toFixed(digits)}%`;
+}
+
+function fmtMoney(v: number | null, digits = 2): string {
+  if (v == null) return "-";
+  const sign = v < 0 ? "-" : "";
+  const abs = Math.abs(v);
+  return `${sign}${abs.toFixed(digits)}`;
+}
+
+function fmtDateTime(v: any): string {
+  if (typeof v !== "string") return "-";
+  return v.replace("+00:00", "").replace("T", " ");
+}
+
+function fmtDurationMinutes(v: number | null): string {
+  if (v == null) return "-";
+  const total = Math.max(0, Math.floor(v));
+  const days = Math.floor(total / 1440);
+  const hours = Math.floor((total % 1440) / 60);
+  const mins = total % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
 }
 
 export default function DarkWorkspace() {
@@ -371,7 +405,262 @@ export default function DarkWorkspace() {
   const lastBacktestResults = (lastBacktest as any)?.results;
 
   const [diffState, setDiffState] = useState<DiffState | null>(null);
-  const [centerMode, setCenterMode] = useState<"code" | "diff">("code");
+  const [centerMode, setCenterMode] = useState<"code" | "diff" | "results">("code");
+  const [resultsShownForBacktestId, setResultsShownForBacktestId] = useState<number | null>(null);
+  const [resultsAdvancedOpen, setResultsAdvancedOpen] = useState(false);
+  const [tradesFilterPair, setTradesFilterPair] = useState<string>("all");
+  const [tradesFilterPnL, setTradesFilterPnL] = useState<"all" | "profit" | "loss">("all");
+  const [tradesSearch, setTradesSearch] = useState<string>("");
+  const [tradesPage, setTradesPage] = useState(1);
+  const tradesPageSize = 50;
+
+  const defaultTradeColWidths = useMemo(
+    () => ({
+      pair: 140,
+      open: 170,
+      close: 170,
+      duration: 100,
+      profitPct: 90,
+      profitAbs: 110,
+      exit: 140,
+    }),
+    [],
+  );
+
+  const [tradeColWidths, setTradeColWidths] = useState<Record<string, number>>(defaultTradeColWidths);
+  const resizingColRef = useRef<null | { key: string; startX: number; startWidth: number }>(null);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(WORKSPACE_TRADES_COL_WIDTHS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return;
+
+      const next: Record<string, number> = { ...defaultTradeColWidths };
+      for (const k of Object.keys(defaultTradeColWidths)) {
+        const v = (parsed as any)[k];
+        const n = toFiniteNumber(v);
+        if (n != null && n >= 60 && n <= 800) next[k] = n;
+      }
+      setTradeColWidths(next);
+    } catch {
+      // ignore
+    }
+  }, [defaultTradeColWidths]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(WORKSPACE_TRADES_COL_WIDTHS_KEY, JSON.stringify(tradeColWidths));
+    } catch {
+      // ignore
+    }
+  }, [tradeColWidths]);
+
+  const endResizeTradeCol = useCallback(() => {
+    resizingColRef.current = null;
+    window.removeEventListener("mousemove", onResizeMoveTradeCol);
+    window.removeEventListener("mouseup", endResizeTradeCol);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, []);
+
+  const onResizeMoveTradeCol = useCallback((e: MouseEvent) => {
+    const st = resizingColRef.current;
+    if (!st) return;
+    const delta = e.clientX - st.startX;
+    const nextW = Math.max(60, Math.min(800, st.startWidth + delta));
+    setTradeColWidths((prev) => {
+      if (prev[st.key] === nextW) return prev;
+      return { ...prev, [st.key]: nextW };
+    });
+  }, []);
+
+  const startResizeTradeCol = useCallback(
+    (key: string) => (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const startWidth = Number(tradeColWidths[key] ?? defaultTradeColWidths[key as keyof typeof defaultTradeColWidths] ?? 120);
+      resizingColRef.current = { key, startX: e.clientX, startWidth };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("mousemove", onResizeMoveTradeCol);
+      window.addEventListener("mouseup", endResizeTradeCol);
+    },
+    [defaultTradeColWidths, endResizeTradeCol, onResizeMoveTradeCol, tradeColWidths],
+  );
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener("mousemove", onResizeMoveTradeCol);
+      window.removeEventListener("mouseup", endResizeTradeCol);
+    };
+  }, [endResizeTradeCol, onResizeMoveTradeCol]);
+
+  const normalizedResults = useMemo(() => {
+    const raw = lastBacktestResults as any;
+    if (!raw || typeof raw !== "object") return null;
+    if (raw?.strategy && typeof raw.strategy === "object") {
+      const keys = Object.keys(raw.strategy);
+      if (keys.length) return raw.strategy[keys[0]];
+    }
+    return raw;
+  }, [lastBacktestResults]);
+
+  const allTrades = useMemo(() => {
+    const r = normalizedResults as any;
+    if (!r || typeof r !== "object") return [] as any[];
+    return Array.isArray(r.trades) ? r.trades : [];
+  }, [normalizedResults]);
+
+  const tradePairs = useMemo(() => {
+    const seen = new Set<string>();
+    for (const t of allTrades) {
+      const p = typeof (t as any)?.pair === "string" ? String((t as any).pair) : "";
+      if (p) seen.add(p);
+    }
+    return Array.from(seen).sort((a, b) => a.localeCompare(b));
+  }, [allTrades]);
+
+  const filteredTrades = useMemo(() => {
+    const q = tradesSearch.trim().toLowerCase();
+    return allTrades.filter((t: any) => {
+      const pair = typeof (t as any)?.pair === "string" ? String((t as any).pair) : "";
+      if (tradesFilterPair !== "all" && pair !== tradesFilterPair) return false;
+
+      const profitAbs = toFiniteNumber((t as any)?.profit_abs);
+      const profitRatio = toFiniteNumber((t as any)?.profit_ratio);
+      const pnl = profitAbs != null ? profitAbs : profitRatio != null ? profitRatio : 0;
+
+      if (tradesFilterPnL === "profit" && pnl <= 0) return false;
+      if (tradesFilterPnL === "loss" && pnl >= 0) return false;
+
+      if (!q) return true;
+
+      const exitReason = typeof (t as any)?.exit_reason === "string" ? String((t as any).exit_reason) : "";
+      const openDate = typeof (t as any)?.open_date === "string" ? String((t as any).open_date) : "";
+      const closeDate = typeof (t as any)?.close_date === "string" ? String((t as any).close_date) : "";
+
+      return (
+        pair.toLowerCase().includes(q) ||
+        exitReason.toLowerCase().includes(q) ||
+        openDate.toLowerCase().includes(q) ||
+        closeDate.toLowerCase().includes(q)
+      );
+    });
+  }, [allTrades, tradesFilterPair, tradesFilterPnL, tradesSearch]);
+
+  const pagedTrades = useMemo(() => {
+    const total = filteredTrades.length;
+    const maxPage = Math.max(1, Math.ceil(total / tradesPageSize));
+    const page = Math.min(Math.max(1, tradesPage), maxPage);
+    const start = (page - 1) * tradesPageSize;
+    const end = start + tradesPageSize;
+    return {
+      page,
+      maxPage,
+      total,
+      rows: filteredTrades.slice(start, end),
+    };
+  }, [filteredTrades, tradesPage, tradesPageSize]);
+
+  useEffect(() => {
+    setTradesPage(1);
+  }, [tradesFilterPair, tradesFilterPnL, tradesSearch, lastBacktestId]);
+
+  const resultsSummary = useMemo(() => {
+    const r = normalizedResults as any;
+    if (!r || typeof r !== "object") return null;
+
+    const startingBalance = toFiniteNumber(r.starting_balance) ?? toFiniteNumber(r.dry_run_wallet);
+    const finalBalance = toFiniteNumber(r.final_balance);
+
+    const profitAbs =
+      toFiniteNumber(r.profit_total_abs) ??
+      (startingBalance != null && finalBalance != null ? finalBalance - startingBalance : null);
+
+    const profitPct =
+      toFiniteNumber(r.profit_total_pct) ??
+      (toFiniteNumber(r.profit_total) != null ? (toFiniteNumber(r.profit_total) as number) * 100 : null) ??
+      (startingBalance != null && profitAbs != null && startingBalance !== 0 ? (profitAbs / startingBalance) * 100 : null);
+
+    const ddPct =
+      toFiniteNumber(r.max_drawdown_account) != null
+        ? (toFiniteNumber(r.max_drawdown_account) as number) * 100
+        : toFiniteNumber(r.max_drawdown) != null
+          ? (toFiniteNumber(r.max_drawdown) as number) * 100
+          : null;
+
+    const totalTrades = toFiniteNumber(r.total_trades);
+    const winratePct =
+      toFiniteNumber(r.winrate) != null
+        ? (toFiniteNumber(r.winrate) as number) * 100
+        : toFiniteNumber(r.win_rate) != null
+          ? (toFiniteNumber(r.win_rate) as number) * 100
+          : null;
+
+    const sharpe = toFiniteNumber(r.sharpe);
+    const sortino = toFiniteNumber(r.sortino);
+    const cagrPct = toFiniteNumber(r.cagr) != null ? (toFiniteNumber(r.cagr) as number) * 100 : null;
+    const profitFactor = toFiniteNumber(r.profit_factor);
+
+    const stakeCurrency = typeof r.stake_currency === "string" ? r.stake_currency : "";
+
+    return {
+      startingBalance,
+      finalBalance,
+      profitAbs,
+      profitPct,
+      ddPct,
+      totalTrades,
+      winratePct,
+      sharpe,
+      sortino,
+      cagrPct,
+      profitFactor,
+      stakeCurrency,
+      timeframe: typeof r.timeframe === "string" ? r.timeframe : null,
+      timerange: typeof r.timerange === "string" ? r.timerange : null,
+      backtestStart: typeof r.backtest_start === "string" ? r.backtest_start : null,
+      backtestEnd: typeof r.backtest_end === "string" ? r.backtest_end : null,
+      backtestDays: toFiniteNumber(r.backtest_days),
+      tradesPerDay: toFiniteNumber(r.trades_per_day),
+      maxOpenTrades: toFiniteNumber(r.max_open_trades),
+      bestPair: r.best_pair && typeof r.best_pair === "object" ? r.best_pair : null,
+      worstPair: r.worst_pair && typeof r.worst_pair === "object" ? r.worst_pair : null,
+      perPair: Array.isArray(r.results_per_pair) ? r.results_per_pair : [],
+    };
+  }, [normalizedResults]);
+
+  const topPairs = useMemo(() => {
+    const perPair = (resultsSummary?.perPair ?? []) as any[];
+    const withTrades = perPair.filter((p) => (toFiniteNumber(p?.trades) ?? 0) > 0);
+    return withTrades
+      .slice()
+      .sort((a, b) => (toFiniteNumber(b?.profit_total_abs) ?? 0) - (toFiniteNumber(a?.profit_total_abs) ?? 0))
+      .slice(0, 6);
+  }, [resultsSummary?.perPair]);
+
+  const worstPairs = useMemo(() => {
+    const perPair = (resultsSummary?.perPair ?? []) as any[];
+    const withTrades = perPair.filter((p) => (toFiniteNumber(p?.trades) ?? 0) > 0);
+    return withTrades
+      .slice()
+      .sort((a, b) => (toFiniteNumber(a?.profit_total_abs) ?? 0) - (toFiniteNumber(b?.profit_total_abs) ?? 0))
+      .slice(0, 6);
+  }, [resultsSummary?.perPair]);
+
+  useEffect(() => {
+    if (!lastBacktestId) return;
+    if (resultsShownForBacktestId === lastBacktestId) return;
+
+    const status = String((lastBacktest as any)?.status || "");
+    if (status !== "completed") return;
+    if (!lastBacktestResults) return;
+
+    setResultsShownForBacktestId(lastBacktestId);
+    setCenterMode((prev) => (prev === "diff" ? prev : "results"));
+  }, [lastBacktest, lastBacktestId, lastBacktestResults, resultsShownForBacktestId]);
 
   const onPreviewValidatedEdit = useCallback(
     async ({ strategyPath, edits, dryRun }: { strategyPath: string; edits: any[]; dryRun?: boolean }) => {
@@ -891,6 +1180,20 @@ export default function DarkWorkspace() {
                   <GitCompare className="w-3.5 h-3.5" />
                   Diff
                 </Button>
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={cn(
+                    "h-7 px-2 text-xs gap-2",
+                    centerMode === "results" ? "bg-white/10 text-white" : "text-slate-300 hover:bg-white/5 hover:text-white",
+                  )}
+                  onClick={() => setCenterMode("results")}
+                  disabled={!lastBacktest}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Results
+                </Button>
               </div>
 
               <div className="flex items-center gap-2">
@@ -935,6 +1238,451 @@ export default function DarkWorkspace() {
                 ) : (
                   <div className="h-full rounded-md border border-white/10 bg-black/20 flex items-center justify-center text-xs text-slate-400">
                     No validated diff yet.
+                  </div>
+                )
+              ) : centerMode === "results" ? (
+                lastBacktest ? (
+                  <div className="h-full rounded-md border border-white/10 bg-black/20 overflow-hidden flex flex-col">
+                    <div className="p-3 border-b border-white/10 bg-black/30">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-[10px] uppercase tracking-wider text-slate-400">Backtest</div>
+                          <div className="text-xs text-slate-200 truncate">#{String((lastBacktest as any)?.id ?? lastBacktestId ?? "-")}</div>
+                        </div>
+                        <div className={cn(
+                          "text-[10px] font-bold uppercase",
+                          String((lastBacktest as any)?.status) === "completed"
+                            ? "text-emerald-200"
+                            : String((lastBacktest as any)?.status) === "failed"
+                              ? "text-red-200"
+                              : "text-purple-200",
+                        )}>
+                          {String((lastBacktest as any)?.status || "-")}
+                        </div>
+                      </div>
+
+                      {resultsSummary ? (
+                        <div className="mt-3 grid grid-cols-2 lg:grid-cols-4 gap-2">
+                          {(() => {
+                            const positive = (resultsSummary.profitAbs ?? 0) >= 0;
+                            return (
+                              <div className={cn(
+                                "rounded-xl border bg-gradient-to-br px-3 py-2",
+                                positive
+                                  ? "border-emerald-500/20 from-emerald-500/15 via-black/30 to-purple-500/10"
+                                  : "border-red-500/20 from-red-500/15 via-black/30 to-purple-500/10",
+                              )}>
+                                <div className="text-[10px] uppercase tracking-wider text-slate-400">Profit</div>
+                                <div className={cn("mt-0.5 text-sm font-bold", positive ? "text-emerald-200" : "text-red-200")}>
+                                  {fmtPct(resultsSummary.profitPct)}
+                                </div>
+                                <div className="text-[11px] text-slate-300">
+                                  {fmtMoney(resultsSummary.profitAbs)} {resultsSummary.stakeCurrency}
+                                </div>
+                              </div>
+                            );
+                          })()}
+
+                          <div className="rounded-xl border border-white/10 bg-gradient-to-br from-purple-500/10 via-black/30 to-red-500/10 px-3 py-2">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-400">Balance</div>
+                            <div className="mt-0.5 text-sm font-bold text-slate-100">
+                              {fmtMoney(resultsSummary.startingBalance)} → {fmtMoney(resultsSummary.finalBalance)} {resultsSummary.stakeCurrency}
+                            </div>
+                            <div className="text-[11px] text-slate-300">Start → Final</div>
+                          </div>
+
+                          <div className="rounded-xl border border-white/10 bg-gradient-to-br from-purple-500/10 via-black/30 to-purple-500/5 px-3 py-2">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-400">Risk</div>
+                            <div className="mt-0.5 text-sm font-bold text-slate-100">DD {fmtPct(resultsSummary.ddPct)}</div>
+                            <div className="text-[11px] text-slate-300">Max drawdown</div>
+                          </div>
+
+                          <div className="rounded-xl border border-white/10 bg-gradient-to-br from-purple-500/10 via-black/30 to-purple-500/5 px-3 py-2">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-400">Trades</div>
+                            <div className="mt-0.5 text-sm font-bold text-slate-100">
+                              {resultsSummary.totalTrades != null ? String(Math.round(resultsSummary.totalTrades)) : "-"}
+                            </div>
+                            <div className="text-[11px] text-slate-300">
+                              {resultsSummary.winratePct != null ? `Win ${fmtPct(resultsSummary.winratePct, 1)}` : "Win -"}
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-xs text-slate-400">No results yet.</div>
+                      )}
+                    </div>
+
+                    <div className="flex-1 min-h-0">
+                      <ScrollArea className="h-full">
+                        <div className="p-3 space-y-3">
+                          {resultsSummary ? (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                                <div className="text-[10px] uppercase tracking-wider text-slate-400">Quality</div>
+                                <div className="mt-2 grid grid-cols-2 gap-2 text-[12px] text-slate-200">
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">Sharpe</div>
+                                    <div className="font-semibold">{resultsSummary.sharpe != null ? resultsSummary.sharpe.toFixed(2) : "-"}</div>
+                                  </div>
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">Sortino</div>
+                                    <div className="font-semibold">{resultsSummary.sortino != null ? resultsSummary.sortino.toFixed(2) : "-"}</div>
+                                  </div>
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">CAGR</div>
+                                    <div className="font-semibold">{fmtPct(resultsSummary.cagrPct)}</div>
+                                  </div>
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">Profit Factor</div>
+                                    <div className="font-semibold">{resultsSummary.profitFactor != null ? resultsSummary.profitFactor.toFixed(2) : "-"}</div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                                <div className="text-[10px] uppercase tracking-wider text-slate-400">Config</div>
+                                <div className="mt-2 grid grid-cols-2 gap-2 text-[12px] text-slate-200">
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">Timeframe</div>
+                                    <div className="font-semibold">{resultsSummary.timeframe ?? "-"}</div>
+                                  </div>
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">Timerange</div>
+                                    <div className="font-semibold truncate">{resultsSummary.timerange ?? "-"}</div>
+                                  </div>
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">Max Open Trades</div>
+                                    <div className="font-semibold">{resultsSummary.maxOpenTrades != null ? String(Math.round(resultsSummary.maxOpenTrades)) : "-"}</div>
+                                  </div>
+                                  <div className="rounded-md border border-white/10 bg-black/20 px-2 py-1">
+                                    <div className="text-[10px] text-slate-400">Period</div>
+                                    <div className="font-semibold">{resultsSummary.backtestDays != null ? `${Math.round(resultsSummary.backtestDays)}d` : "-"}</div>
+                                    <div className="text-[10px] text-slate-400">{resultsSummary.tradesPerDay != null ? `${resultsSummary.tradesPerDay.toFixed(2)} trades/day` : ""}</div>
+                                  </div>
+                                </div>
+                                <div className="mt-2 text-[10px] text-slate-400">
+                                  {resultsSummary.backtestStart && resultsSummary.backtestEnd
+                                    ? `${resultsSummary.backtestStart} → ${resultsSummary.backtestEnd}`
+                                    : null}
+                                </div>
+                              </div>
+                            </div>
+                          ) : null}
+
+                          {resultsSummary?.bestPair || resultsSummary?.worstPair ? (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                              {resultsSummary?.bestPair ? (
+                                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3">
+                                  <div className="text-[10px] uppercase tracking-wider text-emerald-200">Best Pair</div>
+                                  <div className="mt-1 text-sm font-bold text-slate-100">{String((resultsSummary.bestPair as any)?.key ?? "-")}</div>
+                                  <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-slate-200">
+                                    <div>
+                                      <div className="text-[10px] text-slate-400">Trades</div>
+                                      <div className="font-semibold">{String((resultsSummary.bestPair as any)?.trades ?? "-")}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-[10px] text-slate-400">Profit</div>
+                                      <div className="font-semibold">{fmtMoney(toFiniteNumber((resultsSummary.bestPair as any)?.profit_total_abs))}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-[10px] text-slate-400">Winrate</div>
+                                      <div className="font-semibold">{fmtPct(toFiniteNumber((resultsSummary.bestPair as any)?.winrate) != null ? (toFiniteNumber((resultsSummary.bestPair as any)?.winrate) as number) * 100 : null, 1)}</div>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              {resultsSummary?.worstPair ? (
+                                <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3">
+                                  <div className="text-[10px] uppercase tracking-wider text-red-200">Worst Pair</div>
+                                  <div className="mt-1 text-sm font-bold text-slate-100">{String((resultsSummary.worstPair as any)?.key ?? "-")}</div>
+                                  <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-slate-200">
+                                    <div>
+                                      <div className="text-[10px] text-slate-400">Trades</div>
+                                      <div className="font-semibold">{String((resultsSummary.worstPair as any)?.trades ?? "-")}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-[10px] text-slate-400">Profit</div>
+                                      <div className="font-semibold">{fmtMoney(toFiniteNumber((resultsSummary.worstPair as any)?.profit_total_abs))}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-[10px] text-slate-400">Winrate</div>
+                                      <div className="font-semibold">{fmtPct(toFiniteNumber((resultsSummary.worstPair as any)?.winrate) != null ? (toFiniteNumber((resultsSummary.worstPair as any)?.winrate) as number) * 100 : null, 1)}</div>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          {topPairs.length || worstPairs.length ? (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                              <div className="rounded-xl border border-white/10 bg-black/30 overflow-hidden">
+                                <div className="px-3 py-2 border-b border-white/10 bg-black/20">
+                                  <div className="text-[10px] uppercase tracking-wider text-slate-400">Top Pairs</div>
+                                </div>
+                                <div className="p-3">
+                                  {topPairs.length ? (
+                                    <div className="space-y-2">
+                                      {topPairs.map((p) => {
+                                        const profitAbs = toFiniteNumber((p as any)?.profit_total_abs);
+                                        const profitPct = toFiniteNumber((p as any)?.profit_total_pct);
+                                        const positive = (profitAbs ?? 0) >= 0;
+                                        return (
+                                          <div key={String((p as any)?.key)} className="flex items-center justify-between gap-3 text-xs">
+                                            <div className="min-w-0">
+                                              <div className="font-semibold text-slate-100 truncate">{String((p as any)?.key ?? "-")}</div>
+                                              <div className="text-[10px] text-slate-400">Trades {String((p as any)?.trades ?? "-")}</div>
+                                            </div>
+                                            <div className={cn("text-right font-semibold", positive ? "text-emerald-200" : "text-red-200")}>
+                                              <div>{profitPct != null ? fmtPct(profitPct) : "-"}</div>
+                                              <div className="text-[10px]">{fmtMoney(profitAbs)} {resultsSummary?.stakeCurrency ?? ""}</div>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <div className="text-xs text-slate-400">No per-pair results.</div>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="rounded-xl border border-white/10 bg-black/30 overflow-hidden">
+                                <div className="px-3 py-2 border-b border-white/10 bg-black/20">
+                                  <div className="text-[10px] uppercase tracking-wider text-slate-400">Worst Pairs</div>
+                                </div>
+                                <div className="p-3">
+                                  {worstPairs.length ? (
+                                    <div className="space-y-2">
+                                      {worstPairs.map((p) => {
+                                        const profitAbs = toFiniteNumber((p as any)?.profit_total_abs);
+                                        const profitPct = toFiniteNumber((p as any)?.profit_total_pct);
+                                        const positive = (profitAbs ?? 0) >= 0;
+                                        return (
+                                          <div key={String((p as any)?.key)} className="flex items-center justify-between gap-3 text-xs">
+                                            <div className="min-w-0">
+                                              <div className="font-semibold text-slate-100 truncate">{String((p as any)?.key ?? "-")}</div>
+                                              <div className="text-[10px] text-slate-400">Trades {String((p as any)?.trades ?? "-")}</div>
+                                            </div>
+                                            <div className={cn("text-right font-semibold", positive ? "text-emerald-200" : "text-red-200")}>
+                                              <div>{profitPct != null ? fmtPct(profitPct) : "-"}</div>
+                                              <div className="text-[10px]">{fmtMoney(profitAbs)} {resultsSummary?.stakeCurrency ?? ""}</div>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <div className="text-xs text-slate-400">No per-pair results.</div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ) : null}
+
+                          <div className="rounded-xl border border-white/10 bg-black/30 overflow-hidden">
+                            <div className="px-3 py-2 border-b border-white/10 bg-black/20">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="text-[10px] uppercase tracking-wider text-slate-400">Trades</div>
+                                <div className="text-[10px] text-slate-400">
+                                  {pagedTrades.total} trades
+                                </div>
+                              </div>
+                              <div className="mt-2 grid grid-cols-1 lg:grid-cols-4 gap-2">
+                                <Input
+                                  value={tradesSearch}
+                                  onChange={(e) => setTradesSearch(e.target.value)}
+                                  placeholder="Search pair / reason / date"
+                                  className="h-8 text-xs"
+                                />
+
+                                <select
+                                  value={tradesFilterPair}
+                                  onChange={(e) => setTradesFilterPair(e.target.value)}
+                                  className="w-full h-8 rounded-md bg-black/30 border border-white/10 px-2 text-xs text-slate-200 outline-none"
+                                >
+                                  <option value="all">All pairs</option>
+                                  {tradePairs.map((p) => (
+                                    <option key={p} value={p}>
+                                      {p}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                <select
+                                  value={tradesFilterPnL}
+                                  onChange={(e) => setTradesFilterPnL(e.target.value as any)}
+                                  className="w-full h-8 rounded-md bg-black/30 border border-white/10 px-2 text-xs text-slate-200 outline-none"
+                                >
+                                  <option value="all">All trades</option>
+                                  <option value="profit">Profit only</option>
+                                  <option value="loss">Loss only</option>
+                                </select>
+
+                                <div className="flex items-center justify-end gap-2">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-8 px-2 text-xs"
+                                    onClick={() => setTradesPage((p) => Math.max(1, p - 1))}
+                                    disabled={pagedTrades.page <= 1}
+                                  >
+                                    Prev
+                                  </Button>
+                                  <div className="text-xs text-slate-300">
+                                    {pagedTrades.page}/{pagedTrades.maxPage}
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-8 px-2 text-xs"
+                                    onClick={() => setTradesPage((p) => Math.min(pagedTrades.maxPage, p + 1))}
+                                    disabled={pagedTrades.page >= pagedTrades.maxPage}
+                                  >
+                                    Next
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="p-3">
+                              {pagedTrades.rows.length ? (
+                                <div className="overflow-auto rounded-md border border-white/10">
+                                  <table className="w-full text-xs table-fixed">
+                                    <colgroup>
+                                      <col style={{ width: tradeColWidths.pair }} />
+                                      <col style={{ width: tradeColWidths.open }} />
+                                      <col style={{ width: tradeColWidths.close }} />
+                                      <col style={{ width: tradeColWidths.duration }} />
+                                      <col style={{ width: tradeColWidths.profitPct }} />
+                                      <col style={{ width: tradeColWidths.profitAbs }} />
+                                      <col style={{ width: tradeColWidths.exit }} />
+                                    </colgroup>
+                                    <thead className="bg-black/30 text-[10px] uppercase tracking-wider text-slate-400">
+                                      <tr>
+                                        <th className="px-2 py-2 text-left relative">
+                                          <div className="pr-2">Pair</div>
+                                          <div
+                                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize"
+                                            onMouseDown={startResizeTradeCol("pair")}
+                                            title="Drag to resize"
+                                          />
+                                        </th>
+                                        <th className="px-2 py-2 text-left relative">
+                                          <div className="pr-2">Open</div>
+                                          <div
+                                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize"
+                                            onMouseDown={startResizeTradeCol("open")}
+                                            title="Drag to resize"
+                                          />
+                                        </th>
+                                        <th className="px-2 py-2 text-left relative">
+                                          <div className="pr-2">Close</div>
+                                          <div
+                                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize"
+                                            onMouseDown={startResizeTradeCol("close")}
+                                            title="Drag to resize"
+                                          />
+                                        </th>
+                                        <th className="px-2 py-2 text-left relative">
+                                          <div className="pr-2">Duration</div>
+                                          <div
+                                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize"
+                                            onMouseDown={startResizeTradeCol("duration")}
+                                            title="Drag to resize"
+                                          />
+                                        </th>
+                                        <th className="px-2 py-2 text-right relative">
+                                          <div className="pr-2">Profit %</div>
+                                          <div
+                                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize"
+                                            onMouseDown={startResizeTradeCol("profitPct")}
+                                            title="Drag to resize"
+                                          />
+                                        </th>
+                                        <th className="px-2 py-2 text-right relative">
+                                          <div className="pr-2">Profit</div>
+                                          <div
+                                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize"
+                                            onMouseDown={startResizeTradeCol("profitAbs")}
+                                            title="Drag to resize"
+                                          />
+                                        </th>
+                                        <th className="px-2 py-2 text-left relative">
+                                          <div className="pr-2">Exit</div>
+                                          <div
+                                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize"
+                                            onMouseDown={startResizeTradeCol("exit")}
+                                            title="Drag to resize"
+                                          />
+                                        </th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-white/10">
+                                      {pagedTrades.rows.map((t: any, idx: number) => {
+                                        const pair = typeof (t as any)?.pair === "string" ? String((t as any).pair) : "-";
+                                        const openDate = fmtDateTime((t as any)?.open_date);
+                                        const closeDate = fmtDateTime((t as any)?.close_date);
+                                        const durationMin = toFiniteNumber((t as any)?.trade_duration);
+                                        const profitAbs = toFiniteNumber((t as any)?.profit_abs);
+                                        const profitPct = toFiniteNumber((t as any)?.profit_ratio) != null ? (toFiniteNumber((t as any)?.profit_ratio) as number) * 100 : null;
+                                        const positive = (profitAbs ?? (profitPct ?? 0)) > 0;
+                                        const exitReason = typeof (t as any)?.exit_reason === "string" ? String((t as any).exit_reason) : "-";
+
+                                        return (
+                                          <tr key={String((t as any)?.open_timestamp ?? idx)} className={cn("hover:bg-white/5", idx % 2 === 0 ? "bg-black/10" : "bg-black/0")}>
+                                            <td className="px-2 py-2 font-semibold text-slate-100 whitespace-nowrap">{pair}</td>
+                                            <td className="px-2 py-2 text-slate-200 whitespace-nowrap">{openDate}</td>
+                                            <td className="px-2 py-2 text-slate-200 whitespace-nowrap">{closeDate}</td>
+                                            <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{fmtDurationMinutes(durationMin)}</td>
+                                            <td className={cn("px-2 py-2 text-right font-semibold whitespace-nowrap", positive ? "text-emerald-200" : "text-red-200")}>
+                                              {profitPct != null ? fmtPct(profitPct) : "-"}
+                                            </td>
+                                            <td className={cn("px-2 py-2 text-right font-semibold whitespace-nowrap", positive ? "text-emerald-200" : "text-red-200")}>
+                                              {fmtMoney(profitAbs)} {resultsSummary?.stakeCurrency ?? ""}
+                                            </td>
+                                            <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{exitReason}</td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ) : (
+                                <div className="text-xs text-slate-400">No trades match your filters.</div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="rounded-xl border border-white/10 bg-black/30 overflow-hidden">
+                            <div className="px-3 py-2 border-b border-white/10 bg-black/20 flex items-center justify-between">
+                              <div className="text-[10px] uppercase tracking-wider text-slate-400">Advanced</div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-[10px]"
+                                onClick={() => setResultsAdvancedOpen((v) => !v)}
+                              >
+                                {resultsAdvancedOpen ? "Hide JSON" : "Show JSON"}
+                              </Button>
+                            </div>
+                            {resultsAdvancedOpen ? (
+                              <pre className="p-3 text-[11px] leading-relaxed text-slate-200 whitespace-pre-wrap break-words">
+                                {JSON.stringify(lastBacktestResults ?? lastBacktest, null, 2)}
+                              </pre>
+                            ) : null}
+                          </div>
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-full rounded-md border border-white/10 bg-black/20 flex items-center justify-center text-xs text-slate-400">
+                    Run a backtest to view results.
                   </div>
                 )
               ) : activeFileId ? (
