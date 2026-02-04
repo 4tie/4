@@ -383,6 +383,78 @@ export const api = {
       },
     },
   },
+  refinement: {
+    start: {
+      method: 'POST' as const,
+      path: '/api/refinement/start',
+      input: z.object({
+        strategyPath: z.string(),
+        baseConfig: z.any(),
+        maxIterations: z.number().int().min(1).max(8).optional(),
+        rolling: z.object({
+          windowDays: z.number().int().min(1),
+          stepDays: z.number().int().min(1).optional(),
+          count: z.number().int().min(1).max(12).optional(),
+          end: z.string().optional(),
+        }).optional(),
+        model: z.string().optional(),
+      }),
+      responses: {
+        202: z.object({ runId: z.string(), status: z.string() }),
+        400: errorSchemas.validation,
+        500: errorSchemas.internal,
+      },
+    },
+    runs: {
+      method: 'GET' as const,
+      path: '/api/refinement/runs',
+      responses: {
+        200: z.array(z.any()),
+      },
+    },
+    run: {
+      method: 'GET' as const,
+      path: '/api/refinement/runs/:runId',
+      responses: {
+        200: z.any(),
+        404: errorSchemas.notFound,
+      },
+    },
+    stop: {
+      method: 'POST' as const,
+      path: '/api/refinement/runs/:runId/stop',
+      responses: {
+        200: z.object({ success: z.boolean() }).passthrough(),
+        404: errorSchemas.notFound,
+      },
+    },
+    resume: {
+      method: 'POST' as const,
+      path: '/api/refinement/runs/:runId/resume',
+      responses: {
+        200: z.object({ success: z.boolean(), status: z.string().optional() }).passthrough(),
+        404: errorSchemas.notFound,
+        400: errorSchemas.validation,
+      },
+    },
+    rerunBaseline: {
+      method: 'POST' as const,
+      path: '/api/refinement/runs/:runId/rerun-baseline',
+      responses: {
+        202: z.object({ runId: z.string(), status: z.string() }),
+        404: errorSchemas.notFound,
+        400: errorSchemas.validation,
+      },
+    },
+    report: {
+      method: 'GET' as const,
+      path: '/api/refinement/runs/:runId/report',
+      responses: {
+        200: z.any(),
+        404: errorSchemas.notFound,
+      },
+    },
+  },
   chat: {
     sessions: {
       method: 'GET' as const,

@@ -1,15 +1,17 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, PanelRightClose, PanelRightOpen, Zap, BarChart3, Eye } from "lucide-react";
+import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, PanelRightClose, PanelRightOpen, Zap, BarChart3, Eye, Check, ChevronDown, RefreshCw } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
-import { useResolvedAIModel } from "@/hooks/use-ai";
+import { useAIModels, useAIStore, useResolvedAIModel } from "@/hooks/use-ai";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, buildUrl } from "@shared/routes";
 import { AIActionTimeline } from "@/components/ai/AIActionTimeline";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 interface ChatContext {
   fileName?: string;
@@ -106,7 +108,12 @@ export function ChatToggleButton({ isOpen, onToggle }: { isOpen: boolean; onTogg
       size="icon"
       variant="ghost"
       onClick={onToggle}
-      className="toggle-elevate"
+      className={cn(
+        "toggle-elevate relative overflow-hidden",
+        "border border-border/40 bg-background/60 backdrop-blur",
+        "shadow-sm hover:shadow-md",
+        "after:absolute after:inset-0 after:bg-gradient-to-br after:from-primary/10 after:via-transparent after:to-primary/5 after:opacity-0 hover:after:opacity-100 after:transition-opacity",
+      )}
       title={isOpen ? "Hide AI Chat" : "Show AI Chat"}
     >
       {isOpen ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
@@ -557,6 +564,8 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   const [autoExplain, setAutoExplain] = useState<boolean>(() => {
     try {
       const raw = localStorage.getItem("chat:autoExplainRefinement");
@@ -581,6 +590,9 @@ export function ChatPanel({
     isValidating: boolean;
   }>(null);
   const selectedModel = useResolvedAIModel();
+  const setSelectedModel = useAIStore((s) => s.setSelectedModel);
+  const modelsQuery = useAIModels();
+  const models = modelsQuery.data ?? [];
   const queryClient = useQueryClient();
   const scrollRef = useRef<HTMLDivElement>(null);
   const refinementPollerRef = useRef<number | null>(null);
@@ -1391,57 +1403,217 @@ export function ChatPanel({
     }
   };
 
+  const filteredModels = useMemo(() => {
+    const q = modelQuery.trim().toLowerCase();
+    const list = Array.isArray(models) ? models : [];
+    if (!q) return list;
+    return list.filter((m) => {
+      const id = String((m as any)?.id ?? "").toLowerCase();
+      const name = String((m as any)?.name ?? "").toLowerCase();
+      const desc = String((m as any)?.description ?? "").toLowerCase();
+      return id.includes(q) || name.includes(q) || desc.includes(q);
+    });
+  }, [models, modelQuery]);
+
   return (
-    <div 
+    <div
       data-testid="panel-chat"
       className={cn(
-        "h-full w-full bg-card border-l border-border/50 flex flex-col overflow-hidden",
+        "h-full w-full border-l border-border/50 flex flex-col overflow-hidden relative",
+        "bg-gradient-to-b from-background via-background to-primary/5",
+        "transition-opacity duration-200",
         !isOpen && "pointer-events-none opacity-0",
       )}
     >
-      <div className="flex items-center justify-between gap-2 p-3 border-b border-border/50 bg-background">
-        <div className="flex items-center gap-2">
-          <Bot className="w-5 h-5 text-primary" />
-          <span className="font-semibold text-sm">AI Assistant</span>
-        </div>
-        <Button
-          data-testid="button-close-chat"
-          size="icon"
-          variant="ghost"
-          className="h-7 w-7"
-          onClick={onToggle}
-          title="Hide chat panel"
-        >
-          <PanelRightClose className="w-4 h-4" />
-        </Button>
+      <div className="absolute inset-0 pointer-events-none opacity-70 [mask-image:radial-gradient(70%_60%_at_70%_0%,black,transparent)]">
+        <div className="absolute -top-24 -right-24 h-64 w-64 rounded-full bg-primary/20 blur-3xl" />
+        <div className="absolute -bottom-28 -left-24 h-72 w-72 rounded-full bg-primary/10 blur-3xl" />
       </div>
 
-      {context.fileName && (
-        <div className="px-3 py-2 border-b border-border/30 bg-primary/5">
-          <div className="flex flex-col gap-2">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
-                <FileCode className="w-3 h-3 text-primary shrink-0" />
-                <span className="truncate font-medium">{context.fileName.split("/").pop()}</span>
-                {context.lineNumber && (
-                  <span className="text-[10px] bg-secondary/50 px-1 rounded border border-border/20 shrink-0">
-                    L{context.lineNumber}
-                  </span>
-                )}
-                {context.selectedCode && (
-                  <span className="text-[10px] bg-primary/10 text-primary px-1 rounded border border-primary/20 shrink-0">
-                    {context.selectedCode.split("\n").length}L selected
-                  </span>
-                )}
-              </div>
-            </div>
+      <div className={cn(
+        "relative z-10 flex items-center justify-between gap-2 px-3 py-3",
+        "border-b border-border/40",
+        "bg-background/55 backdrop-blur",
+        "shadow-[0_1px_0_0_rgba(255,255,255,0.04)]",
+      )}>
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="h-8 w-8 rounded-lg border border-border/50 bg-primary/10 flex items-center justify-center shadow-sm">
+            <Bot className="w-4 h-4 text-primary" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-sm truncate">AI Assistant</span>
+              {selectedModel ? (
+                <Popover open={modelPickerOpen} onOpenChange={setModelPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className={cn(
+                        "inline-flex items-center gap-1.5",
+                        "text-[10px] px-1.5 py-0.5 rounded",
+                        "border border-primary/20",
+                        "bg-primary/10",
+                        "text-primary/90",
+                        "font-mono tracking-tight",
+                        "truncate",
+                        "hover:bg-primary/15 hover:border-primary/30",
+                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      )}
+                      title="Click to switch models (free only)"
+                    >
+                      <span className="truncate">{selectedModel}</span>
+                      <ChevronDown className="w-3 h-3 opacity-70 shrink-0" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align="start"
+                    sideOffset={8}
+                    className={cn(
+                      "w-[360px] p-2",
+                      "border border-border/50",
+                      "bg-background/70 backdrop-blur-xl",
+                      "shadow-lg",
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2 px-1 pb-2">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold truncate">Free OpenRouter models</div>
+                        <div className="text-[10px] text-muted-foreground truncate">Sorted by most recently updated (when available)</div>
+                      </div>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 rounded-lg border border-border/40 bg-background/40"
+                        title="Refresh list"
+                        onClick={() => modelsQuery.refetch().catch(() => {})}
+                      >
+                        <RefreshCw className={cn("w-3.5 h-3.5", modelsQuery.isFetching && "animate-spin")} />
+                      </Button>
+                    </div>
 
-            <div className="flex flex-wrap items-center gap-1">
+                    <div className="px-1 pb-2">
+                      <Input
+                        value={modelQuery}
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        placeholder="Search models..."
+                        className={cn(
+                          "h-8 text-xs",
+                          "rounded-xl",
+                          "bg-background/50",
+                          "border-border/40",
+                        )}
+                      />
+                    </div>
+
+                    <div className="px-1">
+                      <ScrollArea className="h-[260px]">
+                        <div className="space-y-1 pr-2">
+                          {modelsQuery.isLoading ? (
+                            <div className="text-xs text-muted-foreground px-2 py-2">Loading models...</div>
+                          ) : filteredModels.length === 0 ? (
+                            <div className="text-xs text-muted-foreground px-2 py-2">No matches.</div>
+                          ) : (
+                            filteredModels.map((m) => {
+                              const id = String((m as any)?.id ?? "");
+                              const name = String((m as any)?.name ?? id);
+                              const description = (m as any)?.description ? String((m as any).description) : "";
+                              const isSelected = id === selectedModel;
+                              return (
+                                <button
+                                  key={id}
+                                  type="button"
+                                  className={cn(
+                                    "w-full text-left rounded-xl px-2 py-2",
+                                    "border border-border/40",
+                                    "bg-background/35 backdrop-blur",
+                                    "hover:bg-primary/10 hover:border-primary/25",
+                                    "transition-colors",
+                                    isSelected && "border-primary/30 bg-primary/10",
+                                  )}
+                                  onClick={() => {
+                                    if (!id) return;
+                                    setSelectedModel(id);
+                                    setModelPickerOpen(false);
+                                  }}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="text-xs font-semibold truncate">{name}</div>
+                                      <div className="text-[10px] text-muted-foreground font-mono truncate">{id}</div>
+                                    </div>
+                                    <div className="shrink-0 pt-0.5">
+                                      {isSelected ? <Check className="w-4 h-4 text-primary" /> : null}
+                                    </div>
+                                  </div>
+                                  {description ? (
+                                    <div className="mt-1 text-[10px] text-muted-foreground line-clamp-2">{description}</div>
+                                  ) : null}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              ) : null}
+            </div>
+            <div className="text-[10px] text-muted-foreground truncate">
+              {sessionId ? `Session #${sessionId}` : "Ready"}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <Button
+            data-testid="button-close-chat"
+            size="icon"
+            variant="ghost"
+            className={cn(
+              "h-8 w-8 rounded-lg",
+              "border border-border/40",
+              "bg-background/40 backdrop-blur",
+              "shadow-sm",
+              "hover:border-primary/30 hover:bg-primary/10 hover:text-primary hover:shadow-md",
+              "active:translate-y-px",
+            )}
+            onClick={onToggle}
+            title="Hide chat panel"
+          >
+            <PanelRightClose className="w-4 h-4" />
+          </Button>
+        </div>
+      </div>
+
+      {(context.fileName || context.backtestResults) && (
+        <div className="relative z-10 px-3 py-2 border-b border-border/30 bg-background/40 backdrop-blur">
+          <div className="flex flex-col gap-2">
+            {context.fileName && (
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
+                  <FileCode className="w-3 h-3 text-primary shrink-0" />
+                  <span className="truncate font-medium">{context.fileName.split("/").pop()}</span>
+                  {context.lineNumber && (
+                    <span className="text-[10px] bg-secondary/40 px-1.5 py-0.5 rounded-md border border-border/30 shrink-0">
+                      L{context.lineNumber}
+                    </span>
+                  )}
+                  {context.selectedCode && (
+                    <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-md border border-primary/20 shrink-0">
+                      {context.selectedCode.split("\n").length}L selected
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-1.5">
               {context.backtestResults && (
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-6 w-6 hover:bg-primary/20 hover:text-primary"
+                  className="h-7 w-7 rounded-lg hover:bg-primary/10 hover:text-primary"
                   title="Attach Backtest Results"
                   onClick={() => {
                     const results = context.backtestResults!;
@@ -1449,24 +1621,34 @@ export function ChatPanel({
                     setInput((prev) => prev + resultText);
                   }}
                 >
-                  <BarChart3 className="w-3 h-3" />
+                  <BarChart3 className="w-3.5 h-3.5" />
                 </Button>
               )}
 
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-6 px-2 text-[10px] hover:bg-primary/20 hover:text-primary"
+                className={cn(
+                  "h-7 px-2.5 text-[10px] rounded-lg",
+                  autoExplain ? "bg-primary/10 text-primary hover:bg-primary/15" : "hover:bg-primary/10 hover:text-primary",
+                )}
                 title="When enabled, the chat will automatically ask the AI to interpret completed backtests."
                 onClick={() => setAutoExplain((v) => !v)}
               >
+                <Zap className="w-3 h-3" />
                 Auto: {autoExplain ? "On" : "Off"}
               </Button>
 
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-6 w-6 hover:bg-primary/20 hover:text-primary"
+                className={cn(
+                  "h-7 w-7 rounded-lg",
+                  "border border-border/40",
+                  "bg-background/30 backdrop-blur",
+                  "shadow-sm",
+                  "hover:border-primary/30 hover:bg-primary/10 hover:text-primary hover:shadow-md",
+                )}
                 title="Ask AI to add a TA indicator pack (RSI/EMA/MACD/BB/ATR/ADX/Volume)"
                 onClick={() => {
                   const text = [
@@ -1484,7 +1666,7 @@ export function ChatPanel({
                   setInput((prev) => prev + (prev ? "\n\n" : "") + text);
                 }}
               >
-                <Zap className="w-3 h-3" />
+                <Zap className="w-3.5 h-3.5" />
               </Button>
             </div>
           </div>
@@ -1492,21 +1674,21 @@ export function ChatPanel({
       )}
 
       {Array.isArray(aiActions) && aiActions.length > 0 && (
-        <div className="px-3 py-2 border-b border-border/30 bg-background/80">
+        <div className="relative z-10 px-3 py-2 border-b border-border/30 bg-background/40 backdrop-blur">
           <AIActionTimeline actions={aiActions} variant="compact" />
         </div>
       )}
 
       {refinement && refinement.stage !== "idle" && (
-        <div className="px-3 py-2 border-b border-border/30 bg-background">
-          <div className="rounded-md border border-border/40 bg-muted/30 px-3 py-2">
+        <div className="relative z-10 px-3 py-2 border-b border-border/30 bg-background/40 backdrop-blur">
+          <div className="rounded-xl border border-border/40 bg-muted/20 px-3 py-2 shadow-sm">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs font-medium">
                 {(refinement.stage === "running" || refinement.stage === "starting") ? (
                   <Loader2 className="w-3 h-3 animate-spin" />
                 ) : null}
                 <span>
-                  Refinement Status: {refinement.stage}
+                  Refinement: {refinement.stage}
                   {refinement.type === "batch" ? ` (${refinement.completedIds.length}/${refinement.ids.length})` : ""}
                 </span>
               </div>
@@ -1531,16 +1713,19 @@ export function ChatPanel({
         </div>
       )}
 
-      <ScrollArea ref={scrollRef} className="flex-1 p-3">
+      <ScrollArea ref={scrollRef} className="relative z-10 flex-1 px-3 py-4">
         <div className="space-y-4">
           {!hydrated && (
             <div className="text-xs text-muted-foreground">Loading chat history...</div>
           )}
+
           {messages.length === 0 && (
             <div className="text-center text-muted-foreground text-sm py-8 space-y-4">
-              <Bot className="w-10 h-10 mx-auto mb-3 opacity-30" />
+              <div className="mx-auto h-12 w-12 rounded-2xl border border-border/50 bg-primary/10 flex items-center justify-center shadow-sm">
+                <MessageSquare className="w-6 h-6 text-primary/80" />
+              </div>
               {context.selectedCode && (
-                <div className="mt-2 p-2 bg-primary/5 border border-primary/20 rounded text-[10px] text-primary">
+                <div className="mt-2 p-3 bg-primary/5 border border-primary/20 rounded-xl text-[10px] text-primary max-w-[520px] mx-auto text-left">
                   <div className="flex items-center gap-1 mb-1 font-semibold uppercase">
                     <Code className="w-2.5 h-2.5" />
                     Context: Selected Snippet
@@ -1548,14 +1733,17 @@ export function ChatPanel({
                   <pre className="truncate opacity-70 italic">"{context.selectedCode.substring(0, 100)}..."</pre>
                 </div>
               )}
-              <p className="text-xs mt-2 text-muted-foreground max-w-[260px] mx-auto">
-                I’ll stay grounded in the exact strategy file + backtest metrics you have loaded and suggest changes only where they actually exist.
+              <p className={cn(
+                "text-xs mt-2 max-w-[360px] mx-auto",
+                "text-muted-foreground leading-relaxed",
+              )}>
+                Context-locked: I’ll reference only the loaded strategy file + backtest metrics, and propose edits that map to your code exactly.
               </p>
               {context.backtestResults ? (
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-8 text-[10px] gap-1.5 hover-elevate"
+                  className="h-9 text-[10px] gap-1.5 rounded-xl bg-background/60 backdrop-blur hover-elevate"
                   onClick={() => {
                     const r = context.backtestResults!;
                     const prompt = [
@@ -1574,38 +1762,53 @@ export function ChatPanel({
               ) : null}
             </div>
           )}
+
           {messages.map((message) => (
             <div
               key={message.id}
               data-testid={`message-${message.role}-${message.id}`}
               className={cn(
-                "flex gap-2",
-                message.role === "user" ? "justify-end" : "justify-start"
+                "flex gap-3",
+                message.role === "user" ? "justify-end" : "justify-start",
               )}
             >
               {message.role === "assistant" && (
-                <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-                  <Bot className="w-3 h-3 text-primary" />
+                <div className="w-8 h-8 rounded-xl border border-border/40 bg-primary/10 flex items-center justify-center flex-shrink-0 shadow-sm">
+                  <Bot className="w-4 h-4 text-primary" />
                 </div>
               )}
-              <div className="flex flex-col gap-2 max-w-[85%]">
+
+              <div className="flex flex-col gap-2 max-w-[86%]">
                 <div
                   className={cn(
-                    "rounded-lg px-3 py-2 text-sm",
+                    "rounded-2xl px-3 py-2 text-sm border shadow-sm",
                     message.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted"
+                      ? "bg-primary text-primary-foreground border-primary/30"
+                      : "bg-background/60 backdrop-blur border-border/40",
                   )}
                 >
-                  <pre className="whitespace-pre-wrap font-sans">
+                  <div className="whitespace-pre-wrap leading-relaxed">
                     {message.content.split(/(```[\s\S]*?```)/).map((part, i) => {
-                      if (part.startsWith('```')) {
-                        return <code key={i} className="block bg-black/30 p-2 rounded my-2 overflow-x-auto border border-border/30">{part.replace(/```[a-z]*\n|```/g, '')}</code>;
+                      if (part.startsWith("```")) {
+                        const cleaned = part.replace(/```[a-z]*\n|```/g, "");
+                        return (
+                          <code
+                            key={i}
+                            className={cn(
+                              "block p-3 rounded-xl my-2 overflow-x-auto",
+                              "bg-black/30 border border-border/30",
+                              "text-[12px] font-mono",
+                            )}
+                          >
+                            {cleaned}
+                          </code>
+                        );
                       }
-                      return part;
+                      return <span key={i}>{part}</span>;
                     })}
-                  </pre>
+                  </div>
                 </div>
+
                 {message.role === "assistant" && parseChoiceBlocks(message.content).length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {parseChoiceBlocks(message.content).map((c) => (
@@ -1613,7 +1816,7 @@ export function ChatPanel({
                         key={c.label}
                         size="sm"
                         variant="outline"
-                        className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
+                        className="h-8 text-[10px] gap-1.5 rounded-xl bg-background/60 backdrop-blur hover-elevate"
                         onClick={() => {
                           setInput((prev) => prev + (prev ? "\n" : "") + c.value);
                         }}
@@ -1624,6 +1827,7 @@ export function ChatPanel({
                     ))}
                   </div>
                 )}
+
                 {message.role === "assistant" && (onApplyCode || onApplyConfig) && extractCodeBlocks(message.content).length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {extractCodeBlocks(message.content).map((block, idx) => {
@@ -1766,13 +1970,15 @@ export function ChatPanel({
                         });
                       };
 
+                      const actionButtonClass = "h-8 text-[10px] gap-1.5 rounded-xl bg-background/60 backdrop-blur hover-elevate";
+
                       return (
                         <div key={idx} className="flex gap-2">
                           {hasAction && (
                             <Button
                               size="sm"
                               variant="outline"
-                              className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
+                              className={actionButtonClass}
                               disabled={runBacktestMutation.isPending || runBatchMutation.isPending || runDiagnosticMutation.isPending}
                               onClick={() => {
                                 if (!action) return;
@@ -1859,29 +2065,31 @@ export function ChatPanel({
                                 alert(`Unknown action: ${String((action as any).action)}`);
                               }}
                             >
-                              <BarChart3 className="w-3 h-3" />
+                              <BarChart3 className="w-3.5 h-3.5" />
                               Run
                             </Button>
                           )}
+
                           {allowApplyToEditor && (
                             <Button
                               size="sm"
                               variant="outline"
-                              className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
+                              className={actionButtonClass}
                               onClick={openPreview}
                             >
-                              <Eye className="w-3 h-3" />
+                              <Eye className="w-3.5 h-3.5" />
                               Preview
                             </Button>
                           )}
+
                           {allowApplyToEditor && (
                             <Button
                               size="sm"
                               variant="outline"
-                              className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
+                              className={actionButtonClass}
                               onClick={openPreview}
                             >
-                              <Code className="w-3 h-3" />
+                              <Code className="w-3.5 h-3.5" />
                               {hasSelection
                                 ? "Replace Selection"
                                 : (canReplaceEnclosing
@@ -1891,28 +2099,30 @@ export function ChatPanel({
                                     : "Insert"))}
                             </Button>
                           )}
+
                           {allowApplyToEditor && canApplyAndSave && Boolean(onApplyAndSaveCode) && (
                             <Button
                               size="sm"
                               variant="outline"
-                              className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
+                              className={actionButtonClass}
                               onClick={openPreview}
                             >
-                              <Save className="w-3 h-3" />
+                              <Save className="w-3.5 h-3.5" />
                               Apply & Save
                             </Button>
                           )}
+
                           {hasConfigPatch && (
                             <Button
                               size="sm"
                               variant="outline"
-                              className="h-7 text-[10px] gap-1.5 bg-background hover-elevate"
+                              className={actionButtonClass}
                               onClick={() => {
                                 onApplyConfig?.(patch);
                                 logConfigChange(patch);
                               }}
                             >
-                              <FileCode className="w-3 h-3" />
+                              <FileCode className="w-3.5 h-3.5" />
                               Apply Config
                             </Button>
                           )}
@@ -1922,20 +2132,22 @@ export function ChatPanel({
                   </div>
                 )}
               </div>
+
               {message.role === "user" && (
-                <div className="w-6 h-6 rounded-full bg-secondary flex items-center justify-center flex-shrink-0">
-                  <User className="w-3 h-3" />
+                <div className="w-8 h-8 rounded-xl border border-border/40 bg-secondary/60 backdrop-blur flex items-center justify-center flex-shrink-0 shadow-sm">
+                  <User className="w-4 h-4" />
                 </div>
               )}
             </div>
           ))}
+
           {chatMutation.isPending && (
-            <div className="flex gap-2 justify-start animate-in fade-in slide-in-from-left-2 duration-300">
-              <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-                <Bot className="w-3 h-3 text-primary" />
+            <div className="flex gap-3 justify-start animate-in fade-in slide-in-from-left-2 duration-300">
+              <div className="w-8 h-8 rounded-xl border border-border/40 bg-primary/10 flex items-center justify-center flex-shrink-0 shadow-sm">
+                <Bot className="w-4 h-4 text-primary" />
               </div>
-              <div className="rounded-lg px-3 py-2 text-sm bg-muted flex items-center gap-2">
-                <Loader2 className="w-3 h-3 animate-spin" />
+              <div className="rounded-2xl px-3 py-2 text-sm border border-border/40 bg-background/60 backdrop-blur flex items-center gap-2 shadow-sm">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 <span className="text-xs text-muted-foreground">Thinking...</span>
               </div>
             </div>
@@ -2056,14 +2268,23 @@ export function ChatPanel({
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Ask about your strategy, backtests, or request code changes..."
-            className="min-h-[60px] resize-none text-sm"
+            className={cn(
+              "min-h-[60px] resize-none text-sm",
+              "rounded-2xl border-border/40 bg-background/60 backdrop-blur shadow-sm",
+              "focus-visible:ring-primary/30",
+            )}
           />
           <Button
             data-testid="button-send-message"
             size="icon"
             onClick={handleSend}
             disabled={!input.trim() || chatMutation.isPending}
-            className="h-[60px] w-10 flex-shrink-0"
+            className={cn(
+              "h-[60px] w-12 flex-shrink-0 rounded-2xl",
+              "bg-primary text-primary-foreground",
+              "shadow-sm hover:shadow-md",
+              "disabled:opacity-60",
+            )}
           >
             <Send className="w-4 h-4" />
           </Button>

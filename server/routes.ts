@@ -34,12 +34,23 @@ type DiagnosticLoopProgress = {
   step: string;
 };
 
+type RefinementProgress = {
+  percent: number;
+  iteration: number;
+  stage: string;
+  step: string;
+};
+
 const diagnosticQueue: string[] = [];
 let diagnosticWorkerRunning = false;
 
 const diagnosticLoopQueue: string[] = [];
 let diagnosticLoopWorkerRunning = false;
 const diagnosticLoopStopRequests = new Set<string>();
+
+const refinementQueue: string[] = [];
+let refinementWorkerRunning = false;
+const refinementStopRequests = new Set<string>();
 
 let cachedBinance24hTickers: any[] | null = null;
 let cachedBinance24hTickersAt = 0;
@@ -53,6 +64,15 @@ async function enqueueDiagnosticJob(jobId: string) {
   }
 }
 
+async function enqueueRefinementRun(runId: string) {
+  refinementQueue.push(runId);
+  if (!refinementWorkerRunning) {
+    processRefinementQueue().catch((err) => {
+      console.error("Refinement queue error:", err);
+    });
+  }
+}
+
 function clampNum(value: unknown, min: number, max: number): number {
   const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   if (!Number.isFinite(n)) return min;
@@ -61,6 +81,292 @@ function clampNum(value: unknown, min: number, max: number): number {
 
 async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toPctMaybe(value: unknown): number {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return 0;
+  if (Math.abs(n) <= 1.2) return n * 100;
+  return n;
+}
+
+function toRatioMaybe(value: unknown): number {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return 0;
+  if (Math.abs(n) > 1.2) return n / 100;
+  return n;
+}
+
+function parseJsonBlock(text: string, blockLang: "json" | "action"): any | null {
+  const src = String(text || "");
+  const re = new RegExp("```" + blockLang + "\\s*([\\s\\S]*?)```", "m");
+  const m = src.match(re);
+  if (!m || !m[1]) return null;
+  const raw = String(m[1]).trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function parseLooseJson(text: string): any | null {
+  const src = String(text || "").trim();
+  if (!src) return null;
+  const firstBrace = src.indexOf("{");
+  const lastBrace = src.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const candidate = src.slice(firstBrace, lastBrace + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch {
+    }
+  }
+  try {
+    return JSON.parse(src);
+  } catch {
+    return null;
+  }
+}
+
+function parseRefinementProposal(text: string): any | null {
+  return parseJsonBlock(text, "json") ?? parseLooseJson(text);
+}
+
+function mergeConfigPatch(base: any, patch: any): any {
+  const next = base && typeof base === "object" ? JSON.parse(JSON.stringify(base)) : {};
+  if (!patch || typeof patch !== "object") return next;
+  for (const [k, v] of Object.entries(patch)) {
+    (next as any)[k] = v;
+  }
+  return next;
+}
+
+async function readUserConfig(): Promise<any> {
+  const cfgPath = path.join(process.cwd(), "user_data", "config.json");
+  const raw = await fs.readFile(cfgPath, "utf-8");
+  return JSON.parse(raw);
+}
+
+async function writeUserConfig(nextConfig: any): Promise<void> {
+  const cfgPath = path.join(process.cwd(), "user_data", "config.json");
+  await fs.writeFile(cfgPath, JSON.stringify(nextConfig, null, 2), "utf-8");
+  await storage.syncWithFilesystem();
+}
+
+function applyConfigUpdatePatchToConfig(config: any, input: any): any {
+  const next = config && typeof config === "object" ? JSON.parse(JSON.stringify(config)) : {};
+  if (!input || typeof input !== "object") return next;
+
+  if (typeof input.strategy === "string") {
+    (next as any).strategy = input.strategy;
+  }
+  if (typeof input.timeframe === "string") {
+    (next as any).timeframe = input.timeframe;
+  }
+  if (input.stake_amount !== undefined) {
+    (next as any).dry_run_wallet = input.stake_amount;
+    if (typeof (next as any).stake_amount === "number" || (next as any).stake_amount !== "unlimited") {
+      (next as any).stake_amount = input.stake_amount;
+    }
+  }
+  if (input.max_open_trades !== undefined) {
+    (next as any).max_open_trades = input.max_open_trades;
+  }
+  if (input.tradable_balance_ratio !== undefined) {
+    (next as any).tradable_balance_ratio = input.tradable_balance_ratio;
+  }
+  if (input.trailing_stop !== undefined) {
+    (next as any).trailing_stop = input.trailing_stop;
+  }
+  if (input.trailing_stop_positive !== undefined) {
+    (next as any).trailing_stop_positive = input.trailing_stop_positive;
+  }
+  if (input.trailing_stop_positive_offset !== undefined) {
+    (next as any).trailing_stop_positive_offset = input.trailing_stop_positive_offset;
+  }
+  if (input.trailing_only_offset_is_reached !== undefined) {
+    (next as any).trailing_only_offset_is_reached = input.trailing_only_offset_is_reached;
+  }
+  if (input.minimal_roi !== undefined) {
+    (next as any).minimal_roi = input.minimal_roi;
+  }
+  if (input.stoploss !== undefined) {
+    (next as any).stoploss = input.stoploss;
+  }
+  if (typeof input.timerange === "string") {
+    (next as any).timerange = input.timerange;
+  }
+  if (typeof input.backtest_date_from === "string") {
+    (next as any).backtest_date_from = input.backtest_date_from;
+  }
+  if (typeof input.backtest_date_to === "string") {
+    (next as any).backtest_date_to = input.backtest_date_to;
+  }
+  if (Array.isArray(input.pairs) && input.pairs.length > 0) {
+    (next as any).exchange = (next as any).exchange && typeof (next as any).exchange === "object" ? (next as any).exchange : {};
+    (next as any).exchange.pair_whitelist = input.pairs;
+    if (Array.isArray((next as any).pairlists) && (next as any).pairlists[0]) {
+      (next as any).pairlists[0].pair_whitelist = input.pairs;
+    }
+  }
+  if (input.protections !== undefined) {
+    (next as any).protections = input.protections;
+  }
+
+  return next;
+}
+
+async function applyValidatedStrategyEdits(strategyPath: string, edits: any[], dryRun: boolean): Promise<any> {
+  const projectRoot = process.cwd();
+  const absStrategy = resolvePathWithinProject(strategyPath);
+  const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "edit_tools.py");
+  const res = await runPythonTool(scriptPath, ["apply", absStrategy], { edits, dryRun: Boolean(dryRun) });
+  if (res.code !== 0) {
+    throw new Error(res.err || res.out || "Rejected change(s)");
+  }
+  const parsed = JSON.parse(res.out);
+  if (!dryRun) {
+    await storage.syncWithFilesystem();
+  }
+  return parsed;
+}
+
+function calcTimerangeDays(timerange: unknown): number {
+  const s = String(timerange || "");
+  const m = s.match(/^(\d{8})-(\d{8})$/);
+  if (!m) return 0;
+  const parse = (p: string) => {
+    const y = Number(p.slice(0, 4));
+    const mo = Number(p.slice(4, 6));
+    const d = Number(p.slice(6, 8));
+    const dt = new Date(Date.UTC(y, mo - 1, d));
+    return Number.isFinite(dt.getTime()) ? dt : null;
+  };
+  const a = parse(m[1]);
+  const b = parse(m[2]);
+  if (!a || !b) return 0;
+  const ms = b.getTime() - a.getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return 0;
+  return ms / (24 * 3600 * 1000);
+}
+
+function summarizeBacktestResults(bt: any): { profitTotalPct: number; maxDrawdownPct: number; totalTrades: number; profitAbsTotal: number } {
+  const r = (bt as any)?.results;
+  const profit_total = r ? (r as any).profit_total : 0;
+  const max_drawdown = r ? (r as any).max_drawdown : 0;
+  const total_trades = r ? Number((r as any).total_trades ?? 0) : 0;
+  const profit_abs_total = r ? Number((r as any).profit_abs_total ?? 0) : 0;
+  return {
+    profitTotalPct: toPctMaybe(profit_total),
+    maxDrawdownPct: toPctMaybe(max_drawdown),
+    totalTrades: Number.isFinite(total_trades) ? total_trades : 0,
+    profitAbsTotal: Number.isFinite(profit_abs_total) ? profit_abs_total : 0,
+  };
+}
+
+function suiteAggregates(suite: Array<{ bt: any; timerange?: string }>): {
+  medianProfitPct: number;
+  worstProfitPct: number;
+  worstDrawdownPct: number;
+  avgTradesPerDay: number;
+  worstTradesPerDay: number;
+  profitAbsPerDay: number;
+} {
+  const profits = suite.map(({ bt }) => summarizeBacktestResults(bt).profitTotalPct).filter((x) => Number.isFinite(x));
+  const dds = suite.map(({ bt }) => summarizeBacktestResults(bt).maxDrawdownPct).filter((x) => Number.isFinite(x));
+
+  const tradesPerDay = suite
+    .map(({ bt, timerange }) => {
+      const s = summarizeBacktestResults(bt);
+      const days = calcTimerangeDays(timerange ?? (bt as any)?.config?.timerange ?? (bt as any)?.config?.config?.timerange);
+      if (!Number.isFinite(days) || days <= 0) return null;
+      return s.totalTrades / days;
+    })
+    .filter((x): x is number => typeof x === "number" && Number.isFinite(x));
+
+  const absPerDay = suite
+    .map(({ bt, timerange }) => {
+      const s = summarizeBacktestResults(bt);
+      const days = calcTimerangeDays(timerange ?? (bt as any)?.config?.timerange ?? (bt as any)?.config?.config?.timerange);
+      if (!Number.isFinite(days) || days <= 0) return null;
+      return s.profitAbsTotal / days;
+    })
+    .filter((x): x is number => typeof x === "number" && Number.isFinite(x));
+
+  const median = (arr: number[]) => {
+    if (!arr.length) return 0;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) return (sorted[mid - 1] + sorted[mid]) / 2;
+    return sorted[mid];
+  };
+
+  const min = (arr: number[]) => (arr.length ? Math.min(...arr) : 0);
+  const max = (arr: number[]) => (arr.length ? Math.max(...arr) : 0);
+
+  const avg = (arr: number[]) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 0);
+
+  return {
+    medianProfitPct: median(profits),
+    worstProfitPct: min(profits),
+    worstDrawdownPct: max(dds),
+    avgTradesPerDay: avg(tradesPerDay),
+    worstTradesPerDay: min(tradesPerDay),
+    profitAbsPerDay: avg(absPerDay),
+  };
+}
+
+async function callOpenRouterChat(input: { model: string; system: string; user: string; maxTokens?: number }): Promise<string | null> {
+  const apiKey = getOpenRouterApiKey();
+  const baseUrl = getOpenRouterBaseUrl();
+  if (!apiKey) return null;
+  const upstreamRes = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://replit.com",
+    },
+    body: JSON.stringify({
+      model: input.model,
+      messages: [
+        { role: "system", content: input.system },
+        { role: "user", content: input.user },
+      ],
+      max_tokens: typeof input.maxTokens === "number" ? input.maxTokens : 900,
+    }),
+  });
+  if (!upstreamRes.ok) return null;
+  const data = (await upstreamRes.json()) as any;
+  const content = String(data?.choices?.[0]?.message?.content ?? "").trim();
+  return content || null;
+}
+
+let cachedFeeConfig: { maker: number | null; taker: number | null; at: number } = { maker: null, taker: null, at: 0 };
+
+async function getExchangeFeesFromConfig(): Promise<{ maker: number | null; taker: number | null }> {
+  const now = Date.now();
+  if (now - cachedFeeConfig.at < 30_000) return { maker: cachedFeeConfig.maker, taker: cachedFeeConfig.taker };
+  try {
+    const cfgPath = path.join(process.cwd(), "user_data", "config.json");
+    const raw = await fs.readFile(cfgPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    const makerRaw = parsed?.exchange?.fees?.maker;
+    const takerRaw = parsed?.exchange?.fees?.taker;
+    const maker = typeof makerRaw === "number" ? makerRaw : typeof makerRaw === "string" ? Number(makerRaw) : NaN;
+    const taker = typeof takerRaw === "number" ? takerRaw : typeof takerRaw === "string" ? Number(takerRaw) : NaN;
+    cachedFeeConfig = {
+      maker: Number.isFinite(maker) ? maker : null,
+      taker: Number.isFinite(taker) ? taker : null,
+      at: now,
+    };
+    return { maker: cachedFeeConfig.maker, taker: cachedFeeConfig.taker };
+  } catch {
+    cachedFeeConfig = { maker: null, taker: null, at: now };
+    return { maker: null, taker: null };
+  }
 }
 
 async function runPythonTool(scriptPath: string, args: string[], stdinObj?: any): Promise<{ code: number; out: string; err: string }> {
@@ -1132,6 +1438,686 @@ function buildTimerange(from?: string, to?: string) {
   return (fromPart || toPart) ? `${fromPart}-${toPart}` : "";
 }
 
+async function runRefinementRun(runId: string) {
+  const run = await storage.getAiRefinementRun(runId);
+  if (!run) return;
+
+  const existingIterations = await storage.getAiRefinementIterations(runId);
+  const lastCompletedIteration = existingIterations
+    .filter((it: any) => String(it?.stage || "") === "completed")
+    .reduce((max: number, it: any) => Math.max(max, Number(it?.iteration || 0)), 0);
+
+  const pendingIterationByNumber = new Map<number, any>();
+  for (const it of existingIterations) {
+    const n = Number((it as any)?.iteration);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (String((it as any)?.stage || "") === "completed") continue;
+    const prev = pendingIterationByNumber.get(n);
+    if (!prev || Number((it as any)?.id) > Number((prev as any)?.id)) pendingIterationByNumber.set(n, it);
+  }
+
+  let runState: any = (run as any).report && typeof (run as any).report === "object" ? (run as any).report : {};
+
+  if (refinementStopRequests.has(runId)) {
+    refinementStopRequests.delete(runId);
+    await storage.updateAiRefinementRun(runId, { status: "stopped", stopReason: "stop_requested", finishedAt: new Date() } as any);
+    return;
+  }
+
+  const projectRoot = process.cwd();
+  const strategyPath = String((run as any).strategyPath || "");
+  const baseConfig = (run as any).baseConfig && typeof (run as any).baseConfig === "object" ? (run as any).baseConfig : {};
+  const rolling = (run as any).rolling && typeof (run as any).rolling === "object" ? (run as any).rolling : { windowDays: 30, stepDays: 30, count: 4 };
+  const maxIterations = clampNum((baseConfig as any)?.maxIterations ?? 6, 1, 8);
+  const model = String((run as any)?.model || (baseConfig as any)?.model || "meta-llama/llama-3-8b-instruct:free");
+
+  const configPatchAtStart = (baseConfig as any)?.configPatch;
+  let configOverrides = (baseConfig as any)?.config && typeof (baseConfig as any).config === "object" ? (baseConfig as any).config : {};
+
+  await storage.updateAiRefinementRun(runId, {
+    status: "running",
+    startedAt: (run as any).startedAt ?? new Date(),
+    progress: { percent: 0, iteration: lastCompletedIteration, stage: "start", step: "start" } as RefinementProgress,
+    model,
+  } as any);
+
+  const readStrategy = async () => {
+    const abs = resolvePathWithinProject(strategyPath);
+    return await fs.readFile(abs, "utf-8");
+  };
+
+  const versionsDir = path.join(projectRoot, "user_data", "strategies", "versions");
+  await fs.mkdir(versionsDir, { recursive: true });
+  const strategyBaseName = path.basename(strategyPath);
+
+  const snapshotStrategyPath = async (tag: string) => {
+    const content = await readStrategy();
+    const p = path.join(versionsDir, `${strategyBaseName}.${runId}.${tag}.py`);
+    await fs.writeFile(p, content, "utf-8");
+    return p;
+  };
+
+  const snapshotConfigPath = async (tag: string) => {
+    const cfg = await readUserConfig();
+    const p = path.join(versionsDir, `config.json.${runId}.${tag}.json`);
+    await fs.writeFile(p, JSON.stringify(cfg, null, 2), "utf-8");
+    return p;
+  };
+
+  const restoreConfigSnapshot = async (p: string) => {
+    await restoreConfigSnapshotFromFile(p);
+  };
+
+  const restoreStrategySnapshot = async (p: string) => {
+    await restoreStrategySnapshotFromFile(strategyPath, p);
+  };
+
+  const runSuite = async (suiteTag: string) => {
+    const cfg = await readUserConfig();
+    const effectiveCfg = mergeConfigPatch(cfg, configPatchAtStart);
+    const baseConfigForBacktest = {
+      ...(typeof (effectiveCfg as any)?.timeframe === "string" ? { timeframe: (effectiveCfg as any).timeframe } : {}),
+      ...(typeof (effectiveCfg as any)?.dry_run_wallet === "number" ? { stake_amount: (effectiveCfg as any).dry_run_wallet } : {}),
+      ...(configOverrides && typeof configOverrides === "object" ? configOverrides : {}),
+    };
+
+    const toIsoDate = (d: Date) => {
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+
+    const parseIsoDate = (s: string) => {
+      const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!m) return null;
+      const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+      return Number.isFinite(dt.getTime()) ? dt : null;
+    };
+
+    const windowDays = Number(rolling.windowDays ?? 30);
+    const stepDays = Number(rolling.stepDays ?? rolling.windowDays ?? 30);
+    const count = Number(rolling.count ?? 4);
+    const end = typeof rolling.end === "string" ? parseIsoDate(String(rolling.end)) : null;
+    const endDate = end ?? new Date();
+
+    if (!Number.isFinite(windowDays) || windowDays <= 0) throw new Error("rolling.windowDays must be > 0");
+    if (!Number.isFinite(stepDays) || stepDays <= 0) throw new Error("rolling.stepDays must be > 0");
+    if (!Number.isFinite(count) || count <= 0) throw new Error("rolling.count must be > 0");
+
+    const ranges: Array<{ from: string; to: string }> = [];
+    for (let i = 0; i < count; i++) {
+      const endDt = new Date(endDate.getTime());
+      endDt.setUTCDate(endDt.getUTCDate() - i * stepDays);
+      const startDt = new Date(endDt.getTime());
+      startDt.setUTCDate(startDt.getUTCDate() - windowDays);
+      ranges.push({ from: toIsoDate(startDt), to: toIsoDate(endDt) });
+    }
+    ranges.reverse();
+
+    const backtests: any[] = [];
+    const batchId = `${runId}:${suiteTag}`;
+    for (let idx = 0; idx < ranges.length; idx++) {
+      const r = ranges[idx];
+      const timerange = buildTimerange(r.from, r.to);
+      const runInput = {
+        strategyName: strategyPath,
+        config: {
+          ...(baseConfigForBacktest || {}),
+          backtest_date_from: r.from,
+          backtest_date_to: r.to,
+          timerange,
+          batchId,
+          batchIndex: idx,
+          batchRange: `${r.from}→${r.to}`,
+        },
+      };
+
+      const backtest = await storage.createBacktest(runInput as any);
+      backtests.push({ ...backtest, config: runInput.config });
+
+      try {
+        const projectRoot = process.cwd();
+        const runDir = path.join(projectRoot, "user_data", "backtest_results", "runs", String(backtest.id));
+        await fs.mkdir(runDir, { recursive: true });
+
+        const strategyAbs = resolvePathWithinProject(String(runInput.strategyName || ""));
+        const configAbs = path.join(projectRoot, "user_data", "config.json");
+
+        const [strategyContent, configContent] = await Promise.all([
+          fs.readFile(strategyAbs, "utf-8"),
+          fs.readFile(configAbs, "utf-8"),
+        ]);
+
+        const snapshot = {
+          version: 1,
+          createdAt: new Date().toISOString(),
+          backtestId: backtest.id,
+          batchId,
+          strategyPath: String(runInput.strategyName || ""),
+          strategyContent,
+          configPath: "user_data/config.json",
+          configContent,
+          runInput,
+        };
+
+        await fs.writeFile(path.join(runDir, "snapshot.json"), JSON.stringify(snapshot, null, 2), "utf-8");
+      } catch (e: any) {
+        await storage.appendBacktestLog(backtest.id, `\nWARNING: Failed to write rollback snapshot: ${e?.message || e}\n`);
+      }
+
+      runActualBacktest(backtest.id, runInput);
+    }
+
+    const waitOne = async (id: number, timeoutMs: number) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const bt = await storage.getBacktest(id);
+        if (bt?.status === "completed" || bt?.status === "failed") return bt;
+        if (refinementStopRequests.has(runId)) return bt;
+        await sleep(1000);
+      }
+      return await storage.getBacktest(id);
+    };
+
+    const done: Array<{ id: number; bt: any; timerange?: string }> = [];
+    for (const bt of backtests) {
+      const id = Number(bt?.id);
+      if (!Number.isFinite(id)) continue;
+      const final = await waitOne(id, 60 * 60 * 1000);
+      done.push({ id, bt: final, timerange: String((bt as any)?.config?.timerange ?? "") });
+    }
+
+    const completed = done.filter((x) => String((x.bt as any)?.status) === "completed");
+    const failed = done.filter((x) => String((x.bt as any)?.status) === "failed");
+    return {
+      suiteTag,
+      backtestIds: done.map((x) => x.id),
+      completedIds: completed.map((x) => x.id),
+      failedIds: failed.map((x) => x.id),
+      done,
+      aggregates: suiteAggregates(completed.map((x) => ({ bt: x.bt, timerange: x.timerange }))),
+    };
+  };
+
+  let baselineStrategySnap =
+    runState?.baselineSnapshots && typeof runState.baselineSnapshots === "object" ? String(runState.baselineSnapshots.strategy || "") : "";
+  let baselineConfigSnap =
+    runState?.baselineSnapshots && typeof runState.baselineSnapshots === "object" ? String(runState.baselineSnapshots.config || "") : "";
+
+  let bestStrategySnap =
+    runState?.bestSnapshots && typeof runState.bestSnapshots === "object" ? String(runState.bestSnapshots.strategy || "") : "";
+  let bestConfigSnap =
+    runState?.bestSnapshots && typeof runState.bestSnapshots === "object" ? String(runState.bestSnapshots.config || "") : "";
+
+  let objectiveMode: "profit" | "drawdown" | "balanced" =
+    runState?.objectiveMode === "profit" || runState?.objectiveMode === "drawdown" || runState?.objectiveMode === "balanced"
+      ? runState.objectiveMode
+      : "balanced";
+  let bestAgg: any = runState?.bestMetrics && typeof runState.bestMetrics === "object" ? runState.bestMetrics : null;
+  let bestIteration = Number.isFinite(Number(runState?.bestIteration)) ? Number(runState.bestIteration) : 0;
+
+  const thresholds = {
+    maxDrawdownPct: 15,
+    profitPoorPct: 1,
+    goalProfitPct: 1.5,
+    minTradesPerDay: 1.5,
+    lowTradesPerDayPriority: 1,
+  };
+
+  const stopLimits = {
+    maxConsecutiveNoKeep: 4,
+    maxConsecutiveAiInvalid: 2,
+  };
+
+  const stopIfRequested = async (stage: string) => {
+    if (!refinementStopRequests.has(runId)) return false;
+    refinementStopRequests.delete(runId);
+    await storage.updateAiRefinementRun(runId, {
+      status: "stopped",
+      stopReason: "stop_requested",
+      finishedAt: new Date(),
+      progress: { percent: 100, iteration: bestIteration, stage: "stopped", step: stage } as any,
+    } as any);
+    return true;
+  };
+
+  try {
+    try {
+      if (!runState?.configOverridesApplied && configOverrides && typeof configOverrides === "object" && Object.keys(configOverrides).length > 0) {
+        const currentCfg = await readUserConfig();
+        const nextCfg = applyConfigUpdatePatchToConfig(currentCfg, configOverrides);
+        await writeUserConfig(nextCfg);
+        configOverrides = {};
+        runState = { ...(runState || {}), configOverridesApplied: true };
+        await storage.updateAiRefinementRun(runId, { report: runState } as any);
+      }
+    } catch {
+    }
+
+    const ensureSnapshotPaths = async () => {
+      const usable = async (p: string) => {
+        if (!p) return false;
+        try {
+          await fs.access(p);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      if (!(await usable(baselineStrategySnap))) baselineStrategySnap = "";
+      if (!(await usable(baselineConfigSnap))) baselineConfigSnap = "";
+
+      if (!baselineStrategySnap) baselineStrategySnap = await snapshotStrategyPath("baseline");
+      if (!baselineConfigSnap) baselineConfigSnap = await snapshotConfigPath("baseline");
+
+      runState = {
+        ...(runState || {}),
+        baselineSnapshots: { strategy: baselineStrategySnap, config: baselineConfigSnap },
+      };
+
+      if (!(await usable(bestStrategySnap))) bestStrategySnap = "";
+      if (!(await usable(bestConfigSnap))) bestConfigSnap = "";
+      if (!bestStrategySnap) bestStrategySnap = baselineStrategySnap;
+      if (!bestConfigSnap) bestConfigSnap = baselineConfigSnap;
+
+      runState = {
+        ...(runState || {}),
+        bestSnapshots: { strategy: bestStrategySnap, config: bestConfigSnap },
+      };
+
+      await storage.updateAiRefinementRun(runId, { report: runState } as any);
+    };
+
+    await ensureSnapshotPaths();
+
+    const needBaselineMetrics = !(runState?.baselineMetrics && typeof runState.baselineMetrics === "object");
+    if (needBaselineMetrics) {
+      await restoreStrategySnapshot(baselineStrategySnap);
+      await restoreConfigSnapshot(baselineConfigSnap);
+    }
+
+    await storage.updateAiRefinementRun(runId, { progress: { percent: 2, iteration: 0, stage: "baseline", step: "suite" } as RefinementProgress } as any);
+    const baselineSuite = needBaselineMetrics ? await runSuite("baseline") : { aggregates: runState.baselineMetrics };
+
+    runState = { ...(runState || {}), baselineMetrics: (baselineSuite as any).aggregates };
+
+    if (!bestAgg) bestAgg = (runState.bestMetrics && typeof runState.bestMetrics === "object") ? runState.bestMetrics : (baselineSuite as any).aggregates;
+    if (!Number.isFinite(bestIteration)) bestIteration = Number.isFinite(Number(runState?.bestIteration)) ? Number(runState.bestIteration) : 0;
+
+    const baselineProfit = baselineSuite.aggregates.medianProfitPct;
+    const baselineDd = baselineSuite.aggregates.worstDrawdownPct;
+    if (baselineDd >= thresholds.maxDrawdownPct) objectiveMode = "drawdown";
+    else if (baselineProfit <= thresholds.profitPoorPct) objectiveMode = "profit";
+    else objectiveMode = "balanced";
+    runState = {
+      ...(runState || {}),
+      objectiveMode,
+      thresholds,
+      maxIterations,
+      model,
+      rolling,
+      bestIteration,
+      bestMetrics: bestAgg,
+      bestSnapshots: { strategy: bestStrategySnap, config: bestConfigSnap },
+    };
+    await storage.updateAiRefinementRun(runId, { objectiveMode, report: runState, progress: { percent: 5, iteration: 0, stage: "baseline", step: "done" } as any } as any);
+
+    await restoreStrategySnapshot(bestStrategySnap || baselineStrategySnap);
+    await restoreConfigSnapshot(bestConfigSnap || baselineConfigSnap);
+
+    let completedStopReason: string | null = null;
+    let consecutiveNoKeep = Number.isFinite(Number(runState?.consecutiveNoKeep)) ? Number(runState.consecutiveNoKeep) : 0;
+    let consecutiveAiInvalid = Number.isFinite(Number(runState?.consecutiveAiInvalid)) ? Number(runState.consecutiveAiInvalid) : 0;
+
+    const startIteration = Math.max(1, lastCompletedIteration + 1);
+    for (let iteration = startIteration; iteration <= maxIterations; iteration++) {
+      if (await stopIfRequested("iteration_start")) return;
+
+      const existingIt = pendingIterationByNumber.get(iteration);
+      const it = existingIt
+        ? await storage.updateAiRefinementIteration((existingIt as any).id, {
+            stage: "propose",
+            decision: null,
+            proposed: null,
+            validation: null,
+            applied: null,
+            suite: null,
+            metrics: null,
+            failure: null,
+          } as any)
+        : await storage.createAiRefinementIteration({
+            runId,
+            iteration,
+            stage: "propose",
+          } as any);
+      pendingIterationByNumber.delete(iteration);
+
+      const progress: RefinementProgress = {
+        percent: Math.min(95, 5 + Math.floor((iteration / Math.max(1, maxIterations)) * 90)),
+        iteration,
+        stage: "running",
+        step: "propose",
+      };
+      await storage.updateAiRefinementRun(runId, { progress } as any);
+
+      const strategyContent = await readStrategy();
+      const sys =
+        "You are optimizing a Freqtrade strategy with strict constraints. " +
+        "You must propose EXACTLY ONE experiment per iteration. " +
+        "Your entire response MUST be exactly ONE ```json code block and nothing else. " +
+        "Allowed outputs are ONLY: {type:'strategy_edit', edits:[...]} OR {type:'config_patch', patch:{...}}. " +
+        "Never include both edits and patch. " +
+        "If you cannot comply, return a minimal valid config_patch. " +
+        "For config_patch, only use allowedConfigKeys and keep it small (typically 1-3 keys; if trailing_stop then include its related keys).";
+
+      const allowedConfigKeys = [
+        "timeframe",
+        "max_open_trades",
+        "tradable_balance_ratio",
+        "stoploss",
+        "trailing_stop",
+        "trailing_stop_positive",
+        "trailing_stop_positive_offset",
+        "trailing_only_offset_is_reached",
+        "minimal_roi",
+        "protections",
+      ];
+
+      const recentIterations = (await storage.getAiRefinementIterations(runId))
+        .filter((x: any) => String(x?.stage || "") === "completed")
+        .slice(-3)
+        .map((x: any) => ({
+          iteration: x.iteration,
+          decision: x.decision,
+          metrics: x.metrics,
+          failure: x.failure,
+        }));
+
+      const user = JSON.stringify(
+        {
+          task: "Propose exactly one improvement experiment.",
+          constraints: {
+            one_change_only: true,
+            objectiveMode,
+            thresholds,
+            must_keep_drawdown_under_pct: thresholds.maxDrawdownPct,
+            min_trades_per_day: thresholds.minTradesPerDay,
+            trades_priority_if_below: thresholds.lowTradesPerDayPriority,
+            do_not_invent_missing_context: true,
+          },
+          baselineMetrics: runState?.baselineMetrics ?? null,
+          bestSoFarMetrics: bestAgg,
+          recentIterations,
+          strategyPath,
+          strategyContent: strategyContent.slice(0, 22000),
+          allowedConfigKeys,
+          response_schema: {
+            type: "strategy_edit|config_patch",
+            edits: "only if type=strategy_edit",
+            patch: "only if type=config_patch",
+            reason: "short",
+          },
+          examples: {
+            strategy_edit: {
+              type: "strategy_edit",
+              edits: [
+                {
+                  kind: "replace",
+                  target: { kind: "function", name: "populate_indicators" },
+                  before: "...",
+                  after: "...",
+                },
+              ],
+              reason: "...",
+            },
+            config_patch: {
+              type: "config_patch",
+              patch: { stoploss: -0.25 },
+              reason: "...",
+            },
+          },
+        },
+        null,
+        2,
+      );
+
+      const aiOut = await callOpenRouterChat({ model, system: sys, user, maxTokens: 900 });
+      if (!aiOut) {
+        await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "ai_no_response" } as any);
+        break;
+      }
+
+      let json = parseRefinementProposal(aiOut);
+      if (!json || (json.type !== "strategy_edit" && json.type !== "config_patch")) {
+        const repairSys =
+          "Return ONLY a single ```json code block and nothing else. " +
+          "The JSON must be EXACTLY one of: {type:'strategy_edit',edits:[...]} OR {type:'config_patch',patch:{...}}.";
+        const repairUser = JSON.stringify(
+          {
+            error: "Your previous output was invalid.",
+            allowedConfigKeys,
+            previous: clampText(aiOut, 2000),
+            required: "Return valid JSON now.",
+          },
+          null,
+          2,
+        );
+        const retryOut = await callOpenRouterChat({ model, system: repairSys, user: repairUser, maxTokens: 500 });
+        json = retryOut ? parseRefinementProposal(retryOut) : null;
+      }
+
+      if (!json || (json.type !== "strategy_edit" && json.type !== "config_patch")) {
+        consecutiveAiInvalid += 1;
+        runState = { ...(runState || {}), consecutiveAiInvalid };
+        await storage.updateAiRefinementRun(runId, { report: runState } as any);
+        await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "ai_invalid_json" } as any);
+        if (consecutiveAiInvalid >= stopLimits.maxConsecutiveAiInvalid) {
+          completedStopReason = "too_many_ai_invalid";
+          break;
+        }
+        continue;
+      }
+
+      consecutiveAiInvalid = 0;
+      runState = { ...(runState || {}), consecutiveAiInvalid };
+      await storage.updateAiRefinementRun(runId, { report: runState } as any);
+
+      await storage.updateAiRefinementIteration(it.id, { proposed: json, stage: "validate" } as any);
+      await storage.updateAiRefinementRun(runId, { progress: { ...progress, step: "validate" } as any } as any);
+
+      const preIterStrategySnap = await snapshotStrategyPath(`iter${iteration}.pre`);
+      const preIterConfigSnap = await snapshotConfigPath(`iter${iteration}.pre`);
+
+      if (json.type === "strategy_edit") {
+        const edits = Array.isArray(json.edits) ? json.edits : [];
+        if (!edits.length) {
+          await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "no_edits" } as any);
+          continue;
+        }
+
+        try {
+          const dryData = await applyValidatedStrategyEdits(strategyPath, edits, true);
+          await storage.updateAiRefinementIteration(it.id, { validation: dryData } as any);
+        } catch (e: any) {
+          await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "edit_rejected", validation: { message: e?.message || String(e) } } as any);
+          await restoreStrategySnapshot(preIterStrategySnap);
+          await restoreConfigSnapshot(preIterConfigSnap);
+          continue;
+        }
+
+        try {
+          const applyData = await applyValidatedStrategyEdits(strategyPath, edits, false);
+          await storage.updateAiRefinementIteration(it.id, { applied: applyData } as any);
+        } catch (e: any) {
+          await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "edit_apply_failed", applied: { message: e?.message || String(e) } } as any);
+          await restoreStrategySnapshot(preIterStrategySnap);
+          await restoreConfigSnapshot(preIterConfigSnap);
+          continue;
+        }
+      } else if (json.type === "config_patch") {
+        const patch = json.patch && typeof json.patch === "object" ? json.patch : null;
+        if (!patch) {
+          await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "no_patch" } as any);
+          continue;
+        }
+
+        const allowedSet = new Set(allowedConfigKeys);
+        const disallowed = Object.keys(patch).filter((k) => !allowedSet.has(k));
+        if (disallowed.length) {
+          await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "config_patch_disallowed_keys", validation: { disallowed } } as any);
+          continue;
+        }
+
+        const currentCfg = await readUserConfig();
+        const nextCfg = applyConfigUpdatePatchToConfig(currentCfg, patch);
+        const beforeText = JSON.stringify(currentCfg, null, 2);
+        const afterText = JSON.stringify(nextCfg, null, 2);
+        const configDiff = simpleDiffText(beforeText, afterText);
+        await writeUserConfig(nextCfg);
+        await storage.updateAiRefinementIteration(it.id, { applied: { patch, configDiff, before: currentCfg, after: nextCfg } } as any);
+      }
+
+      await storage.updateAiRefinementIteration(it.id, { stage: "backtest" } as any);
+      await storage.updateAiRefinementRun(runId, { progress: { ...progress, step: "backtest" } as any } as any);
+
+      const suite = await runSuite(`iter${iteration}`);
+      const agg = suite.aggregates;
+      await storage.updateAiRefinementIteration(it.id, {
+        suite: { backtestIds: suite.backtestIds, completedIds: suite.completedIds, failedIds: suite.failedIds },
+        metrics: agg,
+        stage: "evaluate",
+      } as any);
+
+      const hardFailDrawdown = agg.worstDrawdownPct > thresholds.maxDrawdownPct;
+      const baselineTrades = Number(bestAgg.avgTradesPerDay ?? 0);
+      const candidateTrades = Number(agg.avgTradesPerDay ?? 0);
+
+      const tradesOk = (() => {
+        if (baselineTrades >= thresholds.minTradesPerDay) {
+          return candidateTrades >= thresholds.minTradesPerDay;
+        }
+        if (baselineTrades < thresholds.lowTradesPerDayPriority) {
+          return candidateTrades >= baselineTrades;
+        }
+        return candidateTrades >= baselineTrades * 0.95;
+      })();
+
+      const improvedProfit = agg.medianProfitPct > bestAgg.medianProfitPct;
+      const improvedDrawdown = agg.worstDrawdownPct < bestAgg.worstDrawdownPct;
+      const improvedTrades = candidateTrades > baselineTrades;
+
+      const keep =
+        !hardFailDrawdown &&
+        tradesOk &&
+        (improvedProfit || improvedDrawdown || (baselineTrades < thresholds.lowTradesPerDayPriority && improvedTrades));
+
+      if (!keep) {
+        await restoreStrategySnapshot(preIterStrategySnap);
+        await restoreConfigSnapshot(preIterConfigSnap);
+        consecutiveNoKeep += 1;
+        runState = { ...(runState || {}), consecutiveNoKeep };
+        await storage.updateAiRefinementRun(runId, { report: runState } as any);
+        await storage.updateAiRefinementIteration(it.id, { stage: "completed", decision: "rollback" } as any);
+      } else {
+        bestAgg = agg;
+        bestIteration = iteration;
+        bestStrategySnap = await snapshotStrategyPath(`iter${iteration}.keep`);
+        bestConfigSnap = await snapshotConfigPath(`iter${iteration}.keep`);
+        consecutiveNoKeep = 0;
+        runState = {
+          ...(runState || {}),
+          bestIteration,
+          bestMetrics: bestAgg,
+          bestSnapshots: { strategy: bestStrategySnap, config: bestConfigSnap },
+          consecutiveNoKeep,
+        };
+        await storage.updateAiRefinementRun(runId, { report: runState } as any);
+        await storage.updateAiRefinementIteration(it.id, { stage: "completed", decision: "keep" } as any);
+      }
+
+      await storage.updateAiRefinementRun(runId, { progress: { ...progress, step: "done" } as any } as any);
+
+      const goalReached =
+        bestAgg.medianProfitPct >= thresholds.goalProfitPct &&
+        bestAgg.worstDrawdownPct <= thresholds.maxDrawdownPct &&
+        bestAgg.avgTradesPerDay >= thresholds.minTradesPerDay;
+
+      if (goalReached) {
+        completedStopReason = "goal_reached";
+        break;
+      }
+
+      if (consecutiveNoKeep >= stopLimits.maxConsecutiveNoKeep) {
+        completedStopReason = "stagnation";
+        break;
+      }
+    }
+
+    const finalStopReason = completedStopReason ?? "max_iterations";
+    const finalStatus = finalStopReason === "goal_reached" || finalStopReason === "max_iterations" ? "completed" : "stopped";
+
+    const finalReport = {
+      runId,
+      strategyPath,
+      objectiveMode,
+      thresholds,
+      bestIteration,
+      bestMetrics: bestAgg,
+      stopReason: finalStopReason,
+      bestSnapshots: {
+        strategy: bestStrategySnap,
+        config: bestConfigSnap,
+      },
+      baselineSnapshots: {
+        strategy: baselineStrategySnap,
+        config: baselineConfigSnap,
+      },
+      finishedAt: new Date().toISOString(),
+    };
+
+    await storage.updateAiRefinementRun(runId, {
+      status: finalStatus,
+      stopReason: finalStopReason,
+      finishedAt: new Date(),
+      report: finalReport,
+      progress: {
+        percent: 100,
+        iteration: bestIteration,
+        stage: finalStatus === "completed" ? "completed" : "stopped",
+        step: finalStopReason,
+      } as RefinementProgress,
+    } as any);
+  } catch (err: any) {
+    try {
+      await restoreStrategySnapshot(bestStrategySnap || baselineStrategySnap);
+      await restoreConfigSnapshot(bestConfigSnap || baselineConfigSnap);
+    } catch {
+    }
+    await storage.updateAiRefinementRun(runId, {
+      status: "failed",
+      stopReason: "internal_error",
+      finishedAt: new Date(),
+      report: { ...(runState && typeof runState === "object" ? runState : {}), error: err?.message || String(err) },
+      progress: { percent: 100, iteration: bestIteration, stage: "failed", step: "failed" } as any,
+    } as any);
+  }
+}
+
+async function processRefinementQueue() {
+  refinementWorkerRunning = true;
+  try {
+    while (refinementQueue.length > 0) {
+      const runId = refinementQueue.shift();
+      if (!runId) continue;
+      await runRefinementRun(runId);
+    }
+  } finally {
+    refinementWorkerRunning = false;
+  }
+}
+
 function clampText(value: unknown, maxChars: number): string {
   const s = typeof value === "string" ? value : value == null ? "" : String(value);
   if (s.length <= maxChars) return s;
@@ -1146,6 +2132,19 @@ function fileWindowByLine(content: string, lineNumber: number | undefined, radiu
   const end = Math.min(lines.length, target + radiusLines);
   const snippet = lines.slice(start - 1, end).join("\n");
   return `# File window: lines ${start}-${end} (cursor at ${target})\n${snippet}`;
+}
+
+async function restoreConfigSnapshotFromFile(snapshotPath: string) {
+  const raw = await fs.readFile(snapshotPath, "utf-8");
+  const parsed = JSON.parse(raw);
+  await writeUserConfig(parsed);
+}
+
+async function restoreStrategySnapshotFromFile(strategyPath: string, snapshotPath: string) {
+  const abs = resolvePathWithinProject(strategyPath);
+  const content = await fs.readFile(snapshotPath, "utf-8");
+  await fs.writeFile(abs, content, "utf-8");
+  await storage.syncWithFilesystem();
 }
 
 type DerivedTradeMetrics = {
@@ -1432,6 +2431,10 @@ async function fetchOpenRouterFreeModels() {
       id?: string;
       name?: string;
       description?: string;
+      created?: number | string;
+      created_at?: number | string;
+      updated?: number | string;
+      updated_at?: number | string;
       pricing?: { prompt?: string | number; completion?: string | number };
     }>;
   };
@@ -1444,19 +2447,49 @@ async function fetchOpenRouterFreeModels() {
     return Number.isFinite(num) && num === 0;
   };
 
+  const toEpochMs = (value: unknown): number => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      // Heuristic: some APIs return seconds, some ms.
+      return value > 10_000_000_000 ? value : value * 1000;
+    }
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (!s) return 0;
+      const asNum = Number(s);
+      if (Number.isFinite(asNum)) {
+        return asNum > 10_000_000_000 ? asNum : asNum * 1000;
+      }
+      const dt = new Date(s);
+      const t = dt.getTime();
+      return Number.isFinite(t) ? t : 0;
+    }
+    return 0;
+  };
+
   return raw
     .map((m) => {
       const id = String(m?.id ?? "");
       const name = String(m?.name ?? m?.id ?? "");
       const description = m?.description ? String(m.description) : undefined;
+      const updatedMs = Math.max(
+        toEpochMs((m as any)?.updated_at),
+        toEpochMs((m as any)?.updated),
+        toEpochMs((m as any)?.created_at),
+        toEpochMs((m as any)?.created),
+      );
       const pricing = m?.pricing;
       const isFreeBySuffix = id.endsWith(":free");
       const isFreeByPricing = pricing ? isZero(pricing.prompt) && isZero(pricing.completion) : false;
-      return { id, name, description, _isFree: isFreeBySuffix || isFreeByPricing };
+      return { id, name, description, _updatedMs: updatedMs, _isFree: isFreeBySuffix || isFreeByPricing };
     })
     .filter((m) => m.id && m._isFree)
-    .map(({ _isFree, ...rest }) => rest)
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => {
+      const ua = typeof (a as any)._updatedMs === "number" ? (a as any)._updatedMs : 0;
+      const ub = typeof (b as any)._updatedMs === "number" ? (b as any)._updatedMs : 0;
+      if (ua !== ub) return ub - ua;
+      return String(a.name).localeCompare(String(b.name));
+    })
+    .map(({ _isFree, _updatedMs, ...rest }) => rest);
 }
 
 export async function registerRoutes(
@@ -2114,6 +3147,25 @@ Reason about these metrics. For example:
 - Perfect backtests on low trade counts often indicate overfitting.`;
         }
 
+        if ((context as any).lastBacktest?.config) {
+          const cfg = ((context as any).lastBacktest as any).config;
+          const cfgMakerRaw = cfg?.exchange?.fees?.maker;
+          const cfgTakerRaw = cfg?.exchange?.fees?.taker;
+          const cfgMaker = typeof cfgMakerRaw === "number" ? cfgMakerRaw : typeof cfgMakerRaw === "string" ? Number(cfgMakerRaw) : NaN;
+          const cfgTaker = typeof cfgTakerRaw === "number" ? cfgTakerRaw : typeof cfgTakerRaw === "string" ? Number(cfgTakerRaw) : NaN;
+          const fileFees = await getExchangeFeesFromConfig();
+          const maker = Number.isFinite(cfgMaker) ? cfgMaker : fileFees.maker;
+          const taker = Number.isFinite(cfgTaker) ? cfgTaker : fileFees.taker;
+          const makerText = maker == null ? "unknown" : String(maker);
+          const takerText = taker == null ? "unknown" : String(taker);
+          systemPrompt += `\n\nFEES:\n- maker: ${makerText}\n- taker: ${takerText}\n- Note: trade profit_abs / profit_ratio are net of fee_open + fee_close (as provided by Freqtrade).`;
+        } else {
+          const fileFees = await getExchangeFeesFromConfig();
+          if (fileFees.maker != null || fileFees.taker != null) {
+            systemPrompt += `\n\nFEES:\n- maker: ${fileFees.maker == null ? "unknown" : String(fileFees.maker)}\n- taker: ${fileFees.taker == null ? "unknown" : String(fileFees.taker)}\n- Note: trade profit_abs / profit_ratio are net of fee_open + fee_close (as provided by Freqtrade).`;
+          }
+        }
+
         if ((context as any).lastBacktest?.id) {
           const backtestId = Number((context as any).lastBacktest.id);
           if (Number.isFinite(backtestId)) {
@@ -2330,6 +3382,149 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
     if (!run) return res.status(404).json({ message: "Run not found" });
     if (!run.report) return res.status(404).json({ message: "Report not ready" });
     res.json(run.report);
+  });
+
+  // === AI Refinement Loop Endpoints ===
+  app.post(api.refinement.start.path, async (req, res) => {
+    try {
+      const input = api.refinement.start.input.parse(req.body);
+      const { strategyPath } = input;
+      if (!strategyPath.startsWith("user_data/strategies/")) {
+        return res.status(400).json({ message: "strategyPath must be under user_data/strategies/" });
+      }
+      resolvePathWithinProject(strategyPath);
+
+      const runId = uuidv4();
+      const baseConfig = {
+        ...(input.baseConfig && typeof input.baseConfig === "object" ? input.baseConfig : {}),
+        ...(typeof input.maxIterations === "number" ? { maxIterations: input.maxIterations } : {}),
+      };
+      const rolling = input.rolling && typeof input.rolling === "object" ? input.rolling : { windowDays: 30, stepDays: 30, count: 4 };
+      const model = typeof input.model === "string" ? input.model : undefined;
+
+      await storage.createAiRefinementRun({
+        id: runId,
+        strategyPath,
+        baseConfig,
+        rolling,
+        model: model ?? null,
+        status: "queued",
+        progress: { percent: 0, iteration: 0, stage: "queued", step: "queued" } as RefinementProgress,
+      } as any);
+
+      enqueueRefinementRun(runId).catch(() => {});
+      return res.status(202).json({ runId, status: "queued" });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ message: err.errors[0]?.message || "Invalid request" });
+      }
+      return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get(api.refinement.runs.path, async (req, res) => {
+    const runs = await storage.getAiRefinementRuns();
+    res.json(runs);
+  });
+
+  app.get(api.refinement.run.path, async (req, res) => {
+    const runId = String(req.params.runId);
+    const run = await storage.getAiRefinementRun(runId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+    const iterations = await storage.getAiRefinementIterations(runId);
+    res.json({ ...run, iterations });
+  });
+
+  app.post(api.refinement.stop.path, async (req, res) => {
+    const runId = String(req.params.runId);
+    const run = await storage.getAiRefinementRun(runId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+
+    refinementStopRequests.add(runId);
+    if (String((run as any).status) === "queued") {
+      await storage.updateAiRefinementRun(runId, {
+        status: "stopped",
+        stopReason: "stop_requested",
+        finishedAt: new Date(),
+        progress: { percent: 100, iteration: 0, stage: "stopped", step: "stop_requested" } as RefinementProgress,
+      } as any);
+    } else {
+      await storage.updateAiRefinementRun(runId, {
+        progress: { ...((run as any).progress || {}), step: "stop_requested" } as any,
+      } as any);
+    }
+    res.json({ success: true });
+  });
+
+  app.post(api.refinement.resume.path, async (req, res) => {
+    const runId = String(req.params.runId);
+    const run = await storage.getAiRefinementRun(runId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+
+    const status = String((run as any).status || "");
+    if (status === "completed") return res.status(400).json({ message: "Run is already completed" });
+    if (status === "running" || status === "queued") return res.json({ success: true, status });
+
+    refinementStopRequests.delete(runId);
+
+    await storage.updateAiRefinementRun(runId, {
+      status: "queued",
+      stopReason: null,
+      finishedAt: null,
+      progress: { ...(((run as any).progress || {}) as any), stage: "queued", step: "resume" } as any,
+    } as any);
+
+    enqueueRefinementRun(runId).catch(() => {});
+    return res.json({ success: true, status: "queued" });
+  });
+
+  app.post(api.refinement.rerunBaseline.path, async (req, res) => {
+    const sourceRunId = String(req.params.runId);
+    const run = await storage.getAiRefinementRun(sourceRunId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+
+    const status = String((run as any).status || "");
+    if (status === "running" || status === "queued") {
+      return res.status(400).json({ message: "Run must not be running to rerun baseline" });
+    }
+
+    const report = (run as any).report && typeof (run as any).report === "object" ? (run as any).report : null;
+    const baseline = report?.baselineSnapshots && typeof report.baselineSnapshots === "object" ? report.baselineSnapshots : null;
+    const baselineStrategy = baseline && typeof baseline.strategy === "string" ? String(baseline.strategy) : "";
+    const baselineConfig = baseline && typeof baseline.config === "string" ? String(baseline.config) : "";
+
+    if (!baselineStrategy || !baselineConfig) {
+      return res.status(400).json({ message: "Baseline snapshots not found for this run" });
+    }
+
+    try {
+      await restoreStrategySnapshotFromFile(String((run as any).strategyPath || ""), baselineStrategy);
+      await restoreConfigSnapshotFromFile(baselineConfig);
+    } catch (e: any) {
+      return res.status(400).json({ message: e?.message || String(e) });
+    }
+
+    const newRunId = uuidv4();
+    await storage.createAiRefinementRun({
+      id: newRunId,
+      strategyPath: String((run as any).strategyPath || ""),
+      baseConfig: (run as any).baseConfig && typeof (run as any).baseConfig === "object" ? (run as any).baseConfig : {},
+      rolling: (run as any).rolling && typeof (run as any).rolling === "object" ? (run as any).rolling : { windowDays: 30, stepDays: 30, count: 4 },
+      model: typeof (run as any).model === "string" ? (run as any).model : null,
+      status: "queued",
+      progress: { percent: 0, iteration: 0, stage: "queued", step: "queued" } as RefinementProgress,
+    } as any);
+
+    enqueueRefinementRun(newRunId).catch(() => {});
+    return res.status(202).json({ runId: newRunId, status: "queued" });
+  });
+
+  app.get(api.refinement.report.path, async (req, res) => {
+    const runId = String(req.params.runId);
+    const run = await storage.getAiRefinementRun(runId);
+    if (!run) return res.status(404).json({ message: "Run not found" });
+    if (!(run as any).report) return res.status(404).json({ message: "Report not ready" });
+    res.json((run as any).report);
   });
 
   // === Chat Persistence ===
@@ -3223,6 +4418,9 @@ async function runActualBacktest(backtestId: number, config: any) {
                   close_date: String(t?.close_date ?? ""),
                   open_rate: t?.open_rate,
                   close_rate: t?.close_rate,
+                  fee_open: Number(t?.fee_open ?? 0),
+                  fee_close: Number(t?.fee_close ?? 0),
+                  funding_fees: Number(t?.funding_fees ?? 0),
                   enter_tag: t?.enter_tag,
                   exit_reason: t?.exit_reason,
                   stake_amount: t?.stake_amount,

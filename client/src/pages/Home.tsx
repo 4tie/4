@@ -11,6 +11,7 @@ import { BacktestResults } from "@/components/BacktestResults";
 import { StrategyParamsDialog } from "@/components/StrategyParamsDialog";
 import { DiagnosticsPage } from "@/pages/Diagnostics";
 import { DiagnosticLoopPage } from "@/pages/DiagnosticLoop";
+import { RefinementLoopPage } from "@/pages/RefinementLoop";
 import { useFile, useUpdateFile } from "@/hooks/use-files";
 import { useBacktest, useBacktests } from "@/hooks/use-backtests";
 import { useUpdateConfig } from "@/hooks/use-config";
@@ -23,7 +24,7 @@ import type { ImperativePanelHandle } from "react-resizable-panels";
 import { api } from "@shared/routes";
 import { useLocation } from "wouter";
 
-type ViewMode = "ide" | "backtest" | "results" | "comparison" | "diagnostics" | "diagnosticLoop";
+type ViewMode = "ide" | "backtest" | "results" | "comparison" | "diagnostics" | "diagnosticLoop" | "refinement";
 
 export default function Home() {
   const queryClient = useQueryClient();
@@ -337,6 +338,21 @@ export default function Home() {
               <Zap className="w-3.5 h-3.5" />
               Diagnostic Loop
             </Button>
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "h-8 px-3 text-xs gap-2 transition-all duration-200",
+                viewMode === "refinement" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => {
+                setViewMode("refinement");
+                setShowBacktestDashboard(false);
+              }}
+            >
+              Refinement
+            </Button>
           </nav>
         </div>
         
@@ -622,6 +638,8 @@ export default function Home() {
                   />
                 ) : viewMode === "diagnosticLoop" ? (
                   <DiagnosticLoopPage selectedStrategyPath={selectedStrategyName} />
+                ) : viewMode === "refinement" ? (
+                  <RefinementLoopPage selectedStrategyPath={selectedStrategyName} />
                 ) : (
                   <div className="h-full flex flex-col">
                     <div className="h-10 border-b border-border bg-background flex items-center px-4">

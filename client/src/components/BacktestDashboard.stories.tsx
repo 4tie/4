@@ -6,9 +6,9 @@
 export const Primary = {
   // 👇 You can add your component props to here
   args: {
-    onLog: (...args) => 'Jinno is Awesome',
-    onBacktestCompleted: (...args) => 'Jinno is Awesome',
-    onStrategySelected: (...args) => 'Jinno is Awesome',
+    onLog: (...args: any[]) => 'Jinno is Awesome',
+    onBacktestCompleted: (...args: any[]) => 'Jinno is Awesome',
+    onStrategySelected: (...args: any[]) => 'Jinno is Awesome',
     selectedStrategyName: "Jinno is Awesome",
     title: "example",
     value: "example",

@@ -4,7 +4,7 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "NODE_ENV=development node node_modules/tsx/dist/cli.cjs server/index.ts",
+    "dev": "NODE_ENV=development node node_modules/tsx/dist/cli.cjs watch server/index.ts",
     "build": "node node_modules/tsx/dist/cli.cjs script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "node node_modules/typescript/bin/tsc",

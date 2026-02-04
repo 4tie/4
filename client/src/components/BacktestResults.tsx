@@ -181,8 +181,23 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
       const durationMs = open && close ? Math.max(0, close.getTime() - open.getTime()) : 0;
 
       const equityBefore = Number.isFinite(toNum((t as any)?.equity_before)) ? toNum((t as any).equity_before) : equity;
-      const profitAbs = Number.isFinite(toNum((t as any)?.profit_abs)) ? toNum((t as any).profit_abs) : equityBefore * profitRatio;
-      const equityAfter = Number.isFinite(toNum((t as any)?.equity_after)) ? toNum((t as any).equity_after) : equityBefore * (1 + profitRatio);
+      const stake = (() => {
+        const v = toNum((t as any)?.stake_amount);
+        return Number.isFinite(v) && v > 0 ? v : null;
+      })();
+
+      const profitAbs = (() => {
+        const direct = toNum((t as any)?.profit_abs);
+        if (Number.isFinite(direct)) return direct;
+        if (Number.isFinite(profitRatio) && stake != null) return stake * profitRatio;
+        return 0;
+      })();
+
+      const equityAfter = (() => {
+        const direct = toNum((t as any)?.equity_after);
+        if (Number.isFinite(direct)) return direct;
+        return equityBefore + profitAbs;
+      })();
 
       equity = equityAfter;
 
@@ -855,8 +870,8 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {results.trades.map((trade, i) => {
-                    const profit = toNum(trade.profit_ratio);
+                  {computedTrades.map((trade, i) => {
+                    const profit = trade._profitRatio;
                     const entry = trade.open_date ? new Date(trade.open_date) : null;
                     const exit = trade.close_date ? new Date(trade.close_date) : null;
                     const durationMs = entry && exit ? Math.max(0, exit.getTime() - entry.getTime()) : 0;
@@ -868,12 +883,8 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
                           ? `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`
                           : `${durationMin}m`)
                       : "-";
-                    const profitAbs = Number.isFinite(toNum((trade as any)?.profit_abs))
-                      ? toNum((trade as any).profit_abs)
-                      : (Number.isFinite(profit) ? startBalance * profit : 0);
-                    const equityAfter = Number.isFinite(toNum((trade as any)?.equity_after))
-                      ? toNum((trade as any).equity_after)
-                      : NaN;
+                    const profitAbs = trade._profitAbs;
+                    const equityAfter = trade._equityAfter;
                     return (
                       <TableRow
                         key={i}

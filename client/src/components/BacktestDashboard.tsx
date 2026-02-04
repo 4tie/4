@@ -587,8 +587,18 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
 
     let cumulative = stakeAmount;
     const points = selectedTrades.map((t, i) => {
-      const r = parseFloat(String(t?.profit_ratio ?? "0"));
-      cumulative *= (1 + (Number.isFinite(r) ? r : 0));
+      const eqAfter = parseFloat(String((t as any)?.equity_after ?? ""));
+      if (Number.isFinite(eqAfter)) {
+        cumulative = eqAfter;
+      } else {
+        const profitAbs = parseFloat(String((t as any)?.profit_abs ?? ""));
+        if (Number.isFinite(profitAbs)) {
+          cumulative = cumulative + profitAbs;
+        } else {
+          const r = parseFloat(String((t as any)?.profit_ratio ?? "0"));
+          cumulative *= (1 + (Number.isFinite(r) ? r : 0));
+        }
+      }
       return { name: `T${i + 1}`, value: cumulative };
     });
 
@@ -682,8 +692,13 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
         const profitAbs = toNum(t?.profit_abs);
         if (Number.isFinite(profitAbs)) return profitAbs;
         const r = toNum(t?.profit_ratio);
-        const equityBefore = toNum(t?.equity_before);
-        if (Number.isFinite(r) && Number.isFinite(equityBefore)) return equityBefore * r;
+        const stake = (() => {
+          const perTrade = toNum(t?.stake_amount);
+          if (Number.isFinite(perTrade) && perTrade > 0) return perTrade;
+          if (Number.isFinite(stakeAmount) && stakeAmount > 0) return stakeAmount;
+          return NaN;
+        })();
+        if (Number.isFinite(r) && Number.isFinite(stake)) return stake * r;
         return NaN;
       })
       .filter((x) => Number.isFinite(x)) as number[];
@@ -786,6 +801,12 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
           series.push(equity);
           continue;
         }
+        const profitAbs = toNum(t?.profit_abs);
+        if (Number.isFinite(profitAbs)) {
+          equity = equity + profitAbs;
+          series.push(equity);
+          continue;
+        }
         const r = toNum(t?.profit_ratio);
         if (Number.isFinite(r)) {
           equity = equity * (1 + r);
@@ -827,11 +848,11 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
       for (const t of trades as any[]) {
         const pair = String(t?.pair || "-");
         const r = toNum(t?.profit_ratio);
-        const eqBefore = toNum(t?.equity_before);
         const profitAbs = (() => {
           const p = toNum(t?.profit_abs);
           if (Number.isFinite(p)) return p;
-          if (Number.isFinite(r) && Number.isFinite(eqBefore)) return eqBefore * r;
+          const stake = toNum(t?.stake_amount);
+          if (Number.isFinite(r) && Number.isFinite(stake)) return stake * r;
           return 0;
         })();
 

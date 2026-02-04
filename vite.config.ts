@@ -6,7 +6,20 @@ import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 export default defineConfig({
   plugins: [
     react(),
-    runtimeErrorOverlay(),
+    runtimeErrorOverlay({
+      filter: (error) => {
+        const name = String((error as any)?.name ?? "");
+        const message = String((error as any)?.message ?? "");
+        const combined = `${name} ${message}`.toLowerCase();
+
+        if (name === "AbortError") return false;
+        if (name === "CanceledError") return false;
+        if (combined.includes("canceled")) return false;
+        if (combined.includes("cancelled")) return false;
+
+        return true;
+      },
+    }),
     ...(process.env.NODE_ENV !== "production" &&
     process.env.REPL_ID !== undefined
       ? [

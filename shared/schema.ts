@@ -146,6 +146,38 @@ export const agentHandoffs = pgTable("agent_handoffs", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const aiRefinementRuns = pgTable("ai_refinement_runs", {
+  id: text("id").primaryKey(),
+  strategyPath: text("strategy_path").notNull(),
+  baseConfig: jsonb("base_config").notNull(),
+  rolling: jsonb("rolling"),
+  model: text("model"),
+  status: text("status").notNull(),
+  objectiveMode: text("objective_mode"),
+  progress: jsonb("progress"),
+  report: jsonb("report"),
+  stopReason: text("stop_reason"),
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const aiRefinementIterations = pgTable("ai_refinement_iterations", {
+  id: serial("id").primaryKey(),
+  runId: text("run_id").notNull().references(() => aiRefinementRuns.id),
+  iteration: integer("iteration").notNull(),
+  stage: text("stage").notNull(),
+  decision: text("decision"),
+  proposed: jsonb("proposed"),
+  validation: jsonb("validation"),
+  applied: jsonb("applied"),
+  suite: jsonb("suite"),
+  metrics: jsonb("metrics"),
+  failure: text("failure"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertDiagnosticReportSchema = createInsertSchema(diagnosticReports).omit({ id: true, createdAt: true });
 export type DiagnosticReport = typeof diagnosticReports.$inferSelect;
 export type InsertDiagnosticReport = z.infer<typeof insertDiagnosticReportSchema>;
@@ -185,6 +217,14 @@ export type InsertAiAction = z.infer<typeof insertAiActionSchema>;
 export const insertAgentHandoffSchema = createInsertSchema(agentHandoffs).omit({ id: true, createdAt: true });
 export type AgentHandoff = typeof agentHandoffs.$inferSelect;
 export type InsertAgentHandoff = z.infer<typeof insertAgentHandoffSchema>;
+
+export const insertAiRefinementRunSchema = createInsertSchema(aiRefinementRuns).omit({ createdAt: true, startedAt: true, finishedAt: true, updatedAt: true });
+export type AiRefinementRun = typeof aiRefinementRuns.$inferSelect;
+export type InsertAiRefinementRun = z.infer<typeof insertAiRefinementRunSchema>;
+
+export const insertAiRefinementIterationSchema = createInsertSchema(aiRefinementIterations).omit({ id: true, createdAt: true });
+export type AiRefinementIteration = typeof aiRefinementIterations.$inferSelect;
+export type InsertAiRefinementIteration = z.infer<typeof insertAiRefinementIterationSchema>;
 
 // === SCHEMAS ===
 export const insertFileSchema = createInsertSchema(files).omit({ id: true, lastModified: true });

@@ -17,7 +17,7 @@ import { ChatPanel } from "@/components/ChatPanel";
 
 import { useFiles, useFile, useUpdateFile } from "@/hooks/use-files";
 import { useAIModels } from "@/hooks/use-ai";
-import { useBacktest, useRunBacktest } from "@/hooks/use-backtests";
+import { useBacktest, useBacktests, useRunBacktest } from "@/hooks/use-backtests";
 import { useGetConfig } from "@/hooks/use-config";
 import { useTheme } from "@/components/ThemeProvider";
 
@@ -95,9 +95,15 @@ function timerangeYtdUtc(): string {
   return `${fmtTimerangePartUtc(from)}-${fmtTimerangePartUtc(now)}`;
 }
 
-function toFiniteNumber(v: any): number | null {
+function toFiniteNumber(v: unknown): number | null {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   return Number.isFinite(n) ? n : null;
+}
+
+function toPctMaybe(v: unknown): number | null {
+  const n = toFiniteNumber(v);
+  if (n == null) return null;
+  return Math.abs(n) <= 2 ? n * 100 : n;
 }
 
 function fmtPct(v: number | null, digits = 2): string {
@@ -112,9 +118,18 @@ function fmtMoney(v: number | null, digits = 2): string {
   return `${sign}${abs.toFixed(digits)}`;
 }
 
-function fmtDateTime(v: any): string {
+function fmtDateTime(v: unknown): string {
   if (typeof v !== "string") return "-";
+  if (!v) return "-";
   return v.replace("+00:00", "").replace("T", " ");
+}
+
+function dateMs(v: unknown): number | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (!s) return null;
+  const ms = Date.parse(s);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 function fmtDurationMinutes(v: number | null): string {
@@ -401,6 +416,40 @@ export default function DarkWorkspace() {
   const runBacktest = useRunBacktest();
   const [lastBacktestId, setLastBacktestId] = useState<number | null>(null);
   const { data: lastBacktest } = useBacktest(lastBacktestId);
+  const backtestsQuery = useBacktests();
+
+  const latestBacktestIdForActiveStrategy = useMemo(() => {
+    if (!activeFilePath) return null;
+    if (!backtestsQuery.data) return undefined;
+    const list = Array.isArray(backtestsQuery.data) ? (backtestsQuery.data as any[]) : [];
+    const matches = list.filter((b) => String((b as any)?.strategyName || "") === activeFilePath);
+    if (!matches.length) return null;
+    let best = matches[0];
+    for (const b of matches) {
+      const aId = toFiniteNumber((best as any)?.id) ?? -1;
+      const bId = toFiniteNumber((b as any)?.id) ?? -1;
+      if (bId > aId) best = b;
+    }
+    const id = toFiniteNumber((best as any)?.id);
+    return id != null ? Math.floor(id) : null;
+  }, [activeFilePath, backtestsQuery.data]);
+
+  useEffect(() => {
+    if (!activeFilePath) {
+      if (lastBacktestId != null) setLastBacktestId(null);
+      return;
+    }
+    if (latestBacktestIdForActiveStrategy === undefined) {
+      return;
+    }
+    if (latestBacktestIdForActiveStrategy == null) {
+      if (lastBacktestId != null) setLastBacktestId(null);
+      return;
+    }
+    if (lastBacktestId === latestBacktestIdForActiveStrategy) return;
+    setLastBacktestId(latestBacktestIdForActiveStrategy);
+    setResultsAdvancedOpen(false);
+  }, [activeFilePath, lastBacktestId, latestBacktestIdForActiveStrategy]);
 
   const lastBacktestResults = (lastBacktest as any)?.results;
 
@@ -522,6 +571,27 @@ export default function DarkWorkspace() {
     return Array.from(seen).sort((a, b) => a.localeCompare(b));
   }, [allTrades]);
 
+  const tradePairCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of tradePairs) counts.set(p, 0);
+
+    for (const t of allTrades) {
+      const pair = typeof (t as any)?.pair === "string" ? String((t as any).pair) : "";
+      if (!pair) continue;
+
+      const profitAbs = toFiniteNumber((t as any)?.profit_abs);
+      const profitRatio = toFiniteNumber((t as any)?.profit_ratio);
+      const pnl = profitAbs != null ? profitAbs : profitRatio != null ? profitRatio : 0;
+
+      if (tradesFilterPnL === "profit" && pnl <= 0) continue;
+      if (tradesFilterPnL === "loss" && pnl >= 0) continue;
+
+      counts.set(pair, (counts.get(pair) ?? 0) + 1);
+    }
+
+    return counts;
+  }, [allTrades, tradePairs, tradesFilterPnL]);
+
   const filteredTrades = useMemo(() => {
     const q = tradesSearch.trim().toLowerCase();
     return allTrades.filter((t: any) => {
@@ -564,6 +634,70 @@ export default function DarkWorkspace() {
     };
   }, [filteredTrades, tradesPage, tradesPageSize]);
 
+  const filteredTradesTotals = useMemo(() => {
+    let durationMin = 0;
+    let durationCount = 0;
+    let netProfitAbs = 0;
+    let grossProfitAbs = 0;
+    let grossLossAbs = 0;
+    let wins = 0;
+    let losses = 0;
+    let profitPctSum = 0;
+    let profitPctCount = 0;
+    const pairs = new Set<string>();
+
+    for (const t of filteredTrades) {
+      const pair = typeof (t as any)?.pair === "string" ? String((t as any).pair) : "";
+      if (pair) pairs.add(pair);
+
+      const duration =
+        toFiniteNumber((t as any)?.trade_duration) ??
+        (() => {
+          const o = dateMs((t as any)?.open_date);
+          const c = dateMs((t as any)?.close_date);
+          if (o == null || c == null) return null;
+          const delta = c - o;
+          if (!Number.isFinite(delta) || delta < 0) return null;
+          return delta / (1000 * 60);
+        })();
+
+      if (duration != null) {
+        durationMin += duration;
+        durationCount += 1;
+      }
+
+      const pa = toFiniteNumber((t as any)?.profit_abs);
+      if (pa != null) {
+        netProfitAbs += pa;
+        if (pa > 0) {
+          grossProfitAbs += pa;
+          wins += 1;
+        } else if (pa < 0) {
+          grossLossAbs += Math.abs(pa);
+          losses += 1;
+        }
+      }
+
+      const pr = toFiniteNumber((t as any)?.profit_ratio);
+      if (pr != null) {
+        profitPctSum += pr * 100;
+        profitPctCount += 1;
+      }
+    }
+
+    return {
+      pairsCount: pairs.size,
+      durationMin,
+      durationCount,
+      netProfitAbs,
+      grossProfitAbs,
+      grossLossAbs,
+      wins,
+      losses,
+      profitPctAvg: profitPctCount ? profitPctSum / profitPctCount : null,
+    };
+  }, [filteredTrades]);
+
   useEffect(() => {
     setTradesPage(1);
   }, [tradesFilterPair, tradesFilterPnL, tradesSearch, lastBacktestId]);
@@ -572,39 +706,163 @@ export default function DarkWorkspace() {
     const r = normalizedResults as any;
     if (!r || typeof r !== "object") return null;
 
-    const startingBalance = toFiniteNumber(r.starting_balance) ?? toFiniteNumber(r.dry_run_wallet);
-    const finalBalance = toFiniteNumber(r.final_balance);
+    const backtestConfig = (lastBacktest as any)?.config;
+    const configTimeframe = typeof backtestConfig?.timeframe === "string" ? String(backtestConfig.timeframe) : null;
+    const configTimerange = typeof backtestConfig?.timerange === "string" ? String(backtestConfig.timerange) : null;
+    const configMaxOpenTrades = toFiniteNumber(backtestConfig?.max_open_trades);
+
+    const startingBalance =
+      toFiniteNumber(r.starting_balance) ??
+      toFiniteNumber(r.start_balance) ??
+      toFiniteNumber(r.dry_run_wallet);
+    const finalBalance = toFiniteNumber(r.final_balance) ?? toFiniteNumber(r.end_balance);
 
     const profitAbs =
       toFiniteNumber(r.profit_total_abs) ??
+      toFiniteNumber(r.profit_abs_total) ??
       (startingBalance != null && finalBalance != null ? finalBalance - startingBalance : null);
+
+    const profitTotalRaw = toFiniteNumber(r.profit_total);
+    const profitTotalPctFromRaw =
+      profitTotalRaw != null
+        ? Math.abs(profitTotalRaw) <= 2
+          ? profitTotalRaw * 100
+          : profitTotalRaw
+        : null;
 
     const profitPct =
       toFiniteNumber(r.profit_total_pct) ??
-      (toFiniteNumber(r.profit_total) != null ? (toFiniteNumber(r.profit_total) as number) * 100 : null) ??
+      profitTotalPctFromRaw ??
       (startingBalance != null && profitAbs != null && startingBalance !== 0 ? (profitAbs / startingBalance) * 100 : null);
 
-    const ddPct =
-      toFiniteNumber(r.max_drawdown_account) != null
-        ? (toFiniteNumber(r.max_drawdown_account) as number) * 100
-        : toFiniteNumber(r.max_drawdown) != null
-          ? (toFiniteNumber(r.max_drawdown) as number) * 100
-          : null;
+    const ddRaw = toFiniteNumber(r.max_drawdown_account) ?? toFiniteNumber(r.max_drawdown);
+    const ddPct = ddRaw != null ? (Math.abs(ddRaw) <= 2 ? ddRaw * 100 : ddRaw) : null;
 
     const totalTrades = toFiniteNumber(r.total_trades);
-    const winratePct =
-      toFiniteNumber(r.winrate) != null
-        ? (toFiniteNumber(r.winrate) as number) * 100
-        : toFiniteNumber(r.win_rate) != null
-          ? (toFiniteNumber(r.win_rate) as number) * 100
-          : null;
+    const winrateRaw = toFiniteNumber(r.winrate) ?? toFiniteNumber(r.win_rate);
+    const winratePct = winrateRaw != null ? (Math.abs(winrateRaw) <= 2 ? winrateRaw * 100 : winrateRaw) : null;
 
-    const sharpe = toFiniteNumber(r.sharpe);
-    const sortino = toFiniteNumber(r.sortino);
-    const cagrPct = toFiniteNumber(r.cagr) != null ? (toFiniteNumber(r.cagr) as number) * 100 : null;
-    const profitFactor = toFiniteNumber(r.profit_factor);
+    let sharpe = toFiniteNumber(r.sharpe) ?? toFiniteNumber(r.sharpe_ratio);
+    let sortino = toFiniteNumber(r.sortino) ?? toFiniteNumber(r.sortino_ratio);
+    const cagrRaw = toFiniteNumber(r.cagr);
+    let cagrPct = cagrRaw != null ? (Math.abs(cagrRaw) <= 2 ? cagrRaw * 100 : cagrRaw) : null;
 
-    const stakeCurrency = typeof r.stake_currency === "string" ? r.stake_currency : "";
+    const profitFactorStored = toFiniteNumber(r.profit_factor);
+    let profitFactorDerived: number | null = null;
+    if (profitFactorStored == null && Array.isArray(allTrades) && allTrades.length) {
+      let grossProfit = 0;
+      let grossLoss = 0;
+      for (const t of allTrades) {
+        const pa = toFiniteNumber((t as any)?.profit_abs);
+        if (pa == null) continue;
+        if (pa > 0) grossProfit += pa;
+        else if (pa < 0) grossLoss += Math.abs(pa);
+      }
+      if (grossLoss > 0) profitFactorDerived = grossProfit / grossLoss;
+    }
+    const profitFactor = profitFactorStored ?? profitFactorDerived;
+
+    const stakeCurrency =
+      typeof r.stake_currency === "string"
+        ? r.stake_currency
+        : typeof (configData as any)?.stake_currency === "string"
+          ? String((configData as any).stake_currency)
+          : "";
+
+    const derivedDates = (() => {
+      if (!Array.isArray(allTrades) || allTrades.length === 0) return null;
+      let minOpen: number | null = null;
+      let maxClose: number | null = null;
+      for (const t of allTrades) {
+        const o = dateMs((t as any)?.open_date);
+        const c = dateMs((t as any)?.close_date);
+        if (o != null) minOpen = minOpen == null ? o : Math.min(minOpen, o);
+        if (c != null) maxClose = maxClose == null ? c : Math.max(maxClose, c);
+      }
+      if (minOpen == null || maxClose == null) return null;
+      return { minOpen, maxClose };
+    })();
+
+    const derivedBacktestDays = (() => {
+      const explicit = toFiniteNumber(r.backtest_days);
+      if (explicit != null) return explicit;
+      if (!derivedDates) return null;
+      const spanDays = (derivedDates.maxClose - derivedDates.minOpen) / (1000 * 60 * 60 * 24);
+      if (!Number.isFinite(spanDays) || spanDays <= 0) return null;
+      return spanDays;
+    })();
+
+    const derivedTradesPerDay = (() => {
+      const explicit = toFiniteNumber(r.trades_per_day);
+      if (explicit != null) return explicit;
+      const td = totalTrades != null ? totalTrades : Array.isArray(allTrades) ? allTrades.length : 0;
+      if (!derivedBacktestDays || derivedBacktestDays <= 0) return null;
+      return td / derivedBacktestDays;
+    })();
+
+    const derivedStartEnd = (() => {
+      const start = typeof r.backtest_start === "string" ? r.backtest_start : null;
+      const end = typeof r.backtest_end === "string" ? r.backtest_end : null;
+      if (start && end) return { start, end };
+      if (!derivedDates) return { start, end };
+      const ds = new Date(derivedDates.minOpen).toISOString().slice(0, 10);
+      const de = new Date(derivedDates.maxClose).toISOString().slice(0, 10);
+      return { start: start ?? ds, end: end ?? de };
+    })();
+
+    if ((sharpe == null || sortino == null || cagrPct == null) && startingBalance != null && startingBalance > 0 && derivedDates) {
+      const dayPnl = new Map<string, number>();
+      for (const t of allTrades) {
+        const close = dateMs((t as any)?.close_date);
+        const pa = toFiniteNumber((t as any)?.profit_abs);
+        if (close == null || pa == null) continue;
+        const day = new Date(close).toISOString().slice(0, 10);
+        dayPnl.set(day, (dayPnl.get(day) ?? 0) + pa);
+      }
+      const days = Array.from(dayPnl.keys()).sort((a, b) => a.localeCompare(b));
+      if (days.length >= 2) {
+        let equity = startingBalance;
+        const rets: number[] = [];
+        const negRets: number[] = [];
+        for (const d of days) {
+          const pnl = dayPnl.get(d) ?? 0;
+          if (equity > 0) {
+            const r1 = pnl / equity;
+            rets.push(r1);
+            if (r1 < 0) negRets.push(r1);
+          }
+          equity += pnl;
+        }
+
+        const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
+        const std = (xs: number[]) => {
+          if (xs.length < 2) return 0;
+          const m = mean(xs);
+          const v = xs.reduce((s, x) => s + (x - m) * (x - m), 0) / (xs.length - 1);
+          return Math.sqrt(v);
+        };
+        const rf = 0;
+        const dailyMean = mean(rets);
+        const dailyStd = std(rets);
+        const dailyNegStd = std(negRets);
+
+        if (sharpe == null && dailyStd > 0) {
+          sharpe = ((dailyMean - rf) / dailyStd) * Math.sqrt(365);
+        }
+        if (sortino == null && dailyNegStd > 0) {
+          sortino = ((dailyMean - rf) / dailyNegStd) * Math.sqrt(365);
+        }
+
+        if (cagrPct == null) {
+          const spanDays = Math.max(1, (derivedDates.maxClose - derivedDates.minOpen) / (1000 * 60 * 60 * 24));
+          const endEquity = equity;
+          if (endEquity > 0 && spanDays > 0) {
+            const cagr = Math.pow(endEquity / startingBalance, 365 / spanDays) - 1;
+            if (Number.isFinite(cagr)) cagrPct = cagr * 100;
+          }
+        }
+      }
+    }
 
     return {
       startingBalance,
@@ -619,18 +877,18 @@ export default function DarkWorkspace() {
       cagrPct,
       profitFactor,
       stakeCurrency,
-      timeframe: typeof r.timeframe === "string" ? r.timeframe : null,
-      timerange: typeof r.timerange === "string" ? r.timerange : null,
-      backtestStart: typeof r.backtest_start === "string" ? r.backtest_start : null,
-      backtestEnd: typeof r.backtest_end === "string" ? r.backtest_end : null,
-      backtestDays: toFiniteNumber(r.backtest_days),
-      tradesPerDay: toFiniteNumber(r.trades_per_day),
-      maxOpenTrades: toFiniteNumber(r.max_open_trades),
+      timeframe: typeof r.timeframe === "string" ? r.timeframe : configTimeframe,
+      timerange: typeof r.timerange === "string" ? r.timerange : configTimerange,
+      backtestStart: derivedStartEnd.start,
+      backtestEnd: derivedStartEnd.end,
+      backtestDays: derivedBacktestDays,
+      tradesPerDay: derivedTradesPerDay,
+      maxOpenTrades: toFiniteNumber(r.max_open_trades) ?? configMaxOpenTrades,
       bestPair: r.best_pair && typeof r.best_pair === "object" ? r.best_pair : null,
       worstPair: r.worst_pair && typeof r.worst_pair === "object" ? r.worst_pair : null,
       perPair: Array.isArray(r.results_per_pair) ? r.results_per_pair : [],
     };
-  }, [normalizedResults]);
+  }, [allTrades, configData, lastBacktest, normalizedResults]);
 
   const topPairs = useMemo(() => {
     const perPair = (resultsSummary?.perPair ?? []) as any[];
@@ -1366,6 +1624,34 @@ export default function DarkWorkspace() {
                                     : null}
                                 </div>
                               </div>
+
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-300">
+                                <span>
+                                  Duration Σ {fmtDurationMinutes(filteredTradesTotals.durationMin)}
+                                </span>
+                                <span className="text-slate-500">|</span>
+                                <span className={cn("font-semibold", filteredTradesTotals.netProfitAbs >= 0 ? "text-emerald-200" : "text-red-200")}>
+                                  Net {fmtMoney(filteredTradesTotals.netProfitAbs)} {resultsSummary?.stakeCurrency ?? ""}
+                                </span>
+                                <span className="text-slate-500">|</span>
+                                <span className="text-emerald-200">
+                                  Profit {fmtMoney(filteredTradesTotals.grossProfitAbs)}
+                                </span>
+                                <span className="text-slate-500">|</span>
+                                <span className="text-red-200">
+                                  Loss {fmtMoney(filteredTradesTotals.grossLossAbs)}
+                                </span>
+                                <span className="text-slate-500">|</span>
+                                <span>
+                                  W/L {filteredTradesTotals.wins}/{filteredTradesTotals.losses}
+                                </span>
+                                {filteredTradesTotals.profitPctAvg != null ? (
+                                  <>
+                                    <span className="text-slate-500">|</span>
+                                    <span>Avg {fmtPct(filteredTradesTotals.profitPctAvg)}</span>
+                                  </>
+                                ) : null}
+                              </div>
                             </div>
                           ) : null}
 
@@ -1487,6 +1773,8 @@ export default function DarkWorkspace() {
                                 <div className="text-[10px] uppercase tracking-wider text-slate-400">Trades</div>
                                 <div className="text-[10px] text-slate-400">
                                   {pagedTrades.total} trades
+                                  {allTrades.length !== pagedTrades.total ? ` of ${allTrades.length}` : ""}
+                                  {filteredTradesTotals.pairsCount ? ` • ${filteredTradesTotals.pairsCount} pairs` : ""}
                                 </div>
                               </div>
                               <div className="mt-2 grid grid-cols-1 lg:grid-cols-4 gap-2">
@@ -1505,7 +1793,7 @@ export default function DarkWorkspace() {
                                   <option value="all">All pairs</option>
                                   {tradePairs.map((p) => (
                                     <option key={p} value={p}>
-                                      {p}
+                                      {p} ({tradePairCounts.get(p) ?? 0})
                                     </option>
                                   ))}
                                 </select>
@@ -1626,7 +1914,16 @@ export default function DarkWorkspace() {
                                         const pair = typeof (t as any)?.pair === "string" ? String((t as any).pair) : "-";
                                         const openDate = fmtDateTime((t as any)?.open_date);
                                         const closeDate = fmtDateTime((t as any)?.close_date);
-                                        const durationMin = toFiniteNumber((t as any)?.trade_duration);
+                                        const durationMin =
+                                          toFiniteNumber((t as any)?.trade_duration) ??
+                                          (() => {
+                                            const o = dateMs((t as any)?.open_date);
+                                            const c = dateMs((t as any)?.close_date);
+                                            if (o == null || c == null) return null;
+                                            const delta = c - o;
+                                            if (!Number.isFinite(delta) || delta < 0) return null;
+                                            return delta / (1000 * 60);
+                                          })();
                                         const profitAbs = toFiniteNumber((t as any)?.profit_abs);
                                         const profitPct = toFiniteNumber((t as any)?.profit_ratio) != null ? (toFiniteNumber((t as any)?.profit_ratio) as number) * 100 : null;
                                         const positive = (profitAbs ?? (profitPct ?? 0)) > 0;
@@ -1723,12 +2020,12 @@ export default function DarkWorkspace() {
                 lastBacktest: lastBacktestId != null ? { id: lastBacktestId, strategyName: activeFilePath, config: (lastBacktest as any)?.config } : undefined,
                 backtestResults: lastBacktestResults
                   ? {
-                      profit_total: Number(lastBacktestResults.profit_total ?? 0),
-                      win_rate: Number(lastBacktestResults.win_rate ?? 0),
-                      max_drawdown: Number(lastBacktestResults.max_drawdown ?? 0),
-                      total_trades: Number(lastBacktestResults.total_trades ?? 0),
-                      avg_profit: typeof lastBacktestResults?.avg_profit === "number" ? lastBacktestResults.avg_profit : undefined,
-                      sharpe: typeof lastBacktestResults?.sharpe === "number" ? lastBacktestResults.sharpe : undefined,
+                      profit_total: toPctMaybe((lastBacktestResults as any).profit_total) ?? 0,
+                      win_rate: toPctMaybe((lastBacktestResults as any).win_rate) ?? 0,
+                      max_drawdown: toPctMaybe((lastBacktestResults as any).max_drawdown) ?? 0,
+                      total_trades: Number((lastBacktestResults as any).total_trades ?? 0),
+                      avg_profit: toPctMaybe((lastBacktestResults as any).avg_profit) ?? undefined,
+                      sharpe: typeof (lastBacktestResults as any)?.sharpe === "number" ? (lastBacktestResults as any).sharpe : undefined,
                     }
                   : undefined,
               }}

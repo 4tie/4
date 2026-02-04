@@ -10,6 +10,8 @@ import {
   aiChatMessages,
   aiAuditEvents,
   aiActions,
+  aiRefinementRuns,
+  aiRefinementIterations,
   agentHandoffs,
   type File, type InsertFile,
   type Backtest, type InsertBacktest,
@@ -18,6 +20,8 @@ import {
   type DiagnosticJob, type InsertDiagnosticJob,
   type DiagnosticLoopRun, type InsertDiagnosticLoopRun,
   type DiagnosticLoopIteration, type InsertDiagnosticLoopIteration,
+  type AiRefinementRun, type InsertAiRefinementRun,
+  type AiRefinementIteration, type InsertAiRefinementIteration,
   type AiChatSession,
   type AiChatMessage, type InsertAiChatMessage,
   type AiAuditEvent, type InsertAiAuditEvent,
@@ -68,6 +72,16 @@ export interface IStorage {
   createDiagnosticLoopIteration(iteration: InsertDiagnosticLoopIteration): Promise<DiagnosticLoopIteration>;
   updateDiagnosticLoopIteration(id: number, patch: Partial<DiagnosticLoopIteration>): Promise<DiagnosticLoopIteration>;
   getDiagnosticLoopIterations(runId: string): Promise<DiagnosticLoopIteration[]>;
+
+  // AI Refinement Loop
+  createAiRefinementRun(run: InsertAiRefinementRun): Promise<AiRefinementRun>;
+  updateAiRefinementRun(id: string, patch: Partial<AiRefinementRun>): Promise<AiRefinementRun>;
+  getAiRefinementRun(id: string): Promise<AiRefinementRun | undefined>;
+  getAiRefinementRuns(): Promise<AiRefinementRun[]>;
+
+  createAiRefinementIteration(iteration: InsertAiRefinementIteration): Promise<AiRefinementIteration>;
+  updateAiRefinementIteration(id: number, patch: Partial<AiRefinementIteration>): Promise<AiRefinementIteration>;
+  getAiRefinementIterations(runId: string): Promise<AiRefinementIteration[]>;
 
   // AI Chat Persistence
   getAiChatSessionByKey(sessionKey: string): Promise<AiChatSession | undefined>;
@@ -395,6 +409,97 @@ export class DatabaseStorage implements IStorage {
       .from(diagnosticLoopIterations)
       .where(eq(diagnosticLoopIterations.runId, runId))
       .orderBy(asc(diagnosticLoopIterations.createdAt));
+  }
+
+  async createAiRefinementRun(run: InsertAiRefinementRun): Promise<AiRefinementRun> {
+    try {
+      const [inserted] = await db.insert(aiRefinementRuns).values(run as any).returning();
+      return inserted;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_refinement_runs table is missing. Apply migrations (db:push) and retry.");
+      }
+      throw err;
+    }
+  }
+
+  async updateAiRefinementRun(id: string, patch: Partial<AiRefinementRun>): Promise<AiRefinementRun> {
+    try {
+      const [updated] = await db.update(aiRefinementRuns)
+        .set({
+          ...patch,
+          updatedAt: new Date(),
+        } as any)
+        .where(eq(aiRefinementRuns.id, id))
+        .returning();
+      return updated;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_refinement_runs table is missing. Apply migrations (db:push) and retry.");
+      }
+      throw err;
+    }
+  }
+
+  async getAiRefinementRun(id: string): Promise<AiRefinementRun | undefined> {
+    try {
+      const [run] = await db.select().from(aiRefinementRuns).where(eq(aiRefinementRuns.id, id));
+      return run;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return undefined;
+      throw err;
+    }
+  }
+
+  async getAiRefinementRuns(): Promise<AiRefinementRun[]> {
+    try {
+      return await db.select().from(aiRefinementRuns).orderBy(desc(aiRefinementRuns.createdAt));
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return [];
+      throw err;
+    }
+  }
+
+  async createAiRefinementIteration(iteration: InsertAiRefinementIteration): Promise<AiRefinementIteration> {
+    try {
+      const [inserted] = await db.insert(aiRefinementIterations).values(iteration as any).returning();
+      return inserted;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_refinement_iterations table is missing. Apply migrations (db:push) and retry.");
+      }
+      throw err;
+    }
+  }
+
+  async updateAiRefinementIteration(id: number, patch: Partial<AiRefinementIteration>): Promise<AiRefinementIteration> {
+    try {
+      const [updated] = await db.update(aiRefinementIterations)
+        .set({
+          ...patch,
+        } as any)
+        .where(eq(aiRefinementIterations.id, id))
+        .returning();
+      return updated;
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_refinement_iterations table is missing. Apply migrations (db:push) and retry.");
+      }
+      throw err;
+    }
+  }
+
+  async getAiRefinementIterations(runId: string): Promise<AiRefinementIteration[]> {
+    try {
+      return await db
+        .select()
+        .from(aiRefinementIterations)
+        .where(eq(aiRefinementIterations.runId, runId))
+        .orderBy(asc(aiRefinementIterations.createdAt));
+    } catch (err: any) {
+      if (String(err?.code || "") === "42P01") return [];
+      throw err;
+    }
   }
 
   async getAiChatSessionByKey(sessionKey: string): Promise<AiChatSession | undefined> {
