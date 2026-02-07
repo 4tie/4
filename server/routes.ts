@@ -93,6 +93,165 @@ async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parsePythonTraceback(stderrText: string): {
+  exception?: string;
+  message?: string;
+  frames: Array<{ file: string; line: number; func: string; code?: string }>;
+} {
+  const text = String(stderrText || "");
+  const lines = text.split(/\r?\n/);
+  const frames: Array<{ file: string; line: number; func: string; code?: string }> = [];
+
+  // Typical Python frame:
+  //   File "/path/file.py", line 107, in populate_indicators
+  //     bollinger = ...
+  const frameRe = /^\s*File\s+"([^"]+)",\s+line\s+(\d+),\s+in\s+(.+?)\s*$/;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i]?.match(frameRe);
+    if (!m) continue;
+    const file = String(m[1] || "");
+    const line = Number(m[2] || "0");
+    const func = String(m[3] || "");
+    const code = lines[i + 1] && /^\s+\S/.test(lines[i + 1]) ? String(lines[i + 1]).trim() : undefined;
+    if (file && Number.isFinite(line) && line > 0) {
+      frames.push({ file, line, func, code });
+    }
+  }
+
+  // Exception line often at end: "TypeError: ..." or "NameError: ..."
+  let exception: string | undefined;
+  let message: string | undefined;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = String(lines[i] || "").trim();
+    if (!l) continue;
+    const m = l.match(/^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)):\s*(.*)$/);
+    if (m) {
+      exception = String(m[1] || "");
+      message = String(m[2] || "");
+      break;
+    }
+  }
+
+  return { exception, message, frames };
+}
+
+async function buildBacktestFixSuggestions(params: {
+  projectRoot: string;
+  strategyPathRel: string;
+  strategyAbs: string;
+  stderrOutput: string;
+}): Promise<{
+  diagnostics: any;
+  fixSuggestions: any[];
+}> {
+  const { projectRoot, strategyPathRel, strategyAbs, stderrOutput } = params;
+  const diagnostics = parsePythonTraceback(stderrOutput);
+  const fixSuggestions: any[] = [];
+
+  let strategyCode = "";
+  try {
+    strategyCode = await fs.readFile(strategyAbs, "utf-8");
+  } catch {
+    strategyCode = "";
+  }
+
+  // Fix 1: class-scope `self.` assignments
+  if (/name\s+'self'\s+is\s+not\s+defined/.test(stderrOutput) && strategyCode) {
+    const lines = strategyCode.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const m = line.match(/^(\s*)self\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+      if (!m) continue;
+      const indent = String(m[1] || "");
+      const name = String(m[2] || "");
+      const rhs = String(m[3] || "").trimEnd();
+      if (!name || !rhs) continue;
+
+      const before = `${line}\n`;
+      const afterLine = `${indent}${name} = ${rhs}`;
+      const after = `${afterLine}\n`;
+
+      fixSuggestions.push({
+        id: `fix:self-class-scope:${i + 1}:${name}`,
+        title: `Fix invalid self.${name} at class scope`,
+        kind: "strategy_edits",
+        strategyPath: strategyPathRel,
+        edits: [
+          {
+            kind: "replace",
+            target: { kind: "range", startLine: i + 1, endLine: i + 1 },
+            before,
+            after,
+          },
+        ],
+      });
+    }
+  }
+
+  // Fix 2: TA-Lib BBANDS expects float nbdevup/nbdevdn
+  if (/Invalid parameter value for nbdevup \(expected float, got int\)/.test(stderrOutput) && strategyCode) {
+    const lines = strategyCode.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.includes("BBANDS")) continue;
+      if (!/nbdevup\s*=\s*\d+/.test(line) && !/nbdevdn\s*=\s*\d+/.test(line)) continue;
+
+      const fixed = line
+        .replace(/nbdevup\s*=\s*(\d+)(?!\.)/g, "nbdevup=$1.0")
+        .replace(/nbdevdn\s*=\s*(\d+)(?!\.)/g, "nbdevdn=$1.0");
+      if (fixed === line) continue;
+
+      fixSuggestions.push({
+        id: `fix:talib:bbands-floats:${i + 1}`,
+        title: "Fix BBANDS nbdevup/nbdevdn types (use floats)",
+        kind: "strategy_edits",
+        strategyPath: strategyPathRel,
+        edits: [
+          {
+            kind: "replace",
+            target: { kind: "range", startLine: i + 1, endLine: i + 1 },
+            before: `${line}\n`,
+            after: `${fixed}\n`,
+          },
+        ],
+      });
+    }
+  }
+
+  // Fix 3: jsonschema patternProperties TypeError (often caused by int keys like minimal_roi)
+  if (
+    /patternProperties/.test(stderrOutput) &&
+    /expected string or bytes-like object, got 'int'/.test(stderrOutput)
+  ) {
+    // Suggest ensuring config minimal_roi has string keys.
+    fixSuggestions.push({
+      id: `fix:config:minimal-roi-string-keys`,
+      title: "Fix minimal_roi keys (must be strings for schema validation)",
+      kind: "config_patch",
+      patch: {
+        minimal_roi: {
+          "0": 0.1,
+          "60": 0.05,
+          "240": 0.02,
+          "1440": 0.01,
+        },
+      },
+    });
+  }
+
+  // Make suggestion IDs unique
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+  for (const s of fixSuggestions) {
+    const id = String((s as any)?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    deduped.push(s);
+  }
+
+  return { diagnostics, fixSuggestions: deduped };
+}
+
 function toPctMaybe(value: unknown): number {
   const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   if (!Number.isFinite(n)) return 0;
@@ -5783,7 +5942,26 @@ async function runActualBacktest(backtestId: number, config: any) {
         }
       } else {
         await storage.appendBacktestLog(backtestId, `\n✗ Backtest failed with exit code ${code}\n`);
-        await storage.updateBacktestStatus(backtestId, "failed");
+
+        const stderrTail = String(stderrOutput || "").slice(-12_000);
+        let parsed: { diagnostics: any; fixSuggestions: any[] } = { diagnostics: {}, fixSuggestions: [] };
+        try {
+          parsed = await buildBacktestFixSuggestions({
+            projectRoot,
+            strategyPathRel: strategyPath,
+            strategyAbs,
+            stderrOutput: stderrTail,
+          });
+        } catch (e: any) {
+          await storage.appendBacktestLog(backtestId, `\n⚠ Failed to parse error for suggestions: ${e?.message || String(e)}\n`);
+        }
+
+        await storage.updateBacktestStatus(backtestId, "failed", {
+          error: `Backtest failed with exit code ${code}`,
+          stderrTail,
+          diagnostics: parsed.diagnostics,
+          fixSuggestions: parsed.fixSuggestions,
+        });
       }
     });
   } catch (err: any) {

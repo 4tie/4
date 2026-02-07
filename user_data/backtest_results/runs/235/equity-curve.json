@@ -1,0 +1,211 @@
+[
+  {
+    "idx": 0,
+    "pair": "ICP/USDT",
+    "close_date": "2026-01-15 04:45:00+00:00",
+    "profit_ratio": 0.02997002997002997,
+    "profit_abs": 0.2961504,
+    "equity_before": 50,
+    "equity_after": 50.2961504,
+    "peak": 50.2961504,
+    "drawdown": 0
+  },
+  {
+    "idx": 1,
+    "pair": "ICP/USDT",
+    "close_date": "2026-01-15 11:15:00+00:00",
+    "profit_ratio": 0.006912730127015842,
+    "profit_abs": 0.0686185,
+    "equity_before": 50.2961504,
+    "equity_after": 50.3647689,
+    "peak": 50.3647689,
+    "drawdown": 0
+  },
+  {
+    "idx": 2,
+    "pair": "ICP/USDT",
+    "close_date": "2026-01-19 00:00:00+00:00",
+    "profit_ratio": -0.033729347575501424,
+    "profit_abs": -0.3357738,
+    "equity_before": 50.3647689,
+    "equity_after": 50.0289951,
+    "peak": 50.3647689,
+    "drawdown": 0.006666838890230634
+  },
+  {
+    "idx": 3,
+    "pair": "VET/USDT",
+    "close_date": "2026-01-19 00:00:00+00:00",
+    "profit_ratio": -0.033523335869906266,
+    "profit_abs": -0.334629,
+    "equity_before": 50.0289951,
+    "equity_after": 49.6943661,
+    "peak": 50.3647689,
+    "drawdown": 0.013310947605678341
+  },
+  {
+    "idx": 4,
+    "pair": "DOT/USDT",
+    "close_date": "2026-01-19 00:00:00+00:00",
+    "profit_ratio": -0.03341210847264116,
+    "profit_abs": -0.3287494,
+    "equity_before": 49.6943661,
+    "equity_after": 49.365616700000004,
+    "peak": 50.3647689,
+    "drawdown": 0.019838315985998646
+  },
+  {
+    "idx": 5,
+    "pair": "ADA/USDT",
+    "close_date": "2026-01-19 04:10:00+00:00",
+    "profit_ratio": 0.0023972724220453373,
+    "profit_abs": 0.02345142,
+    "equity_before": 49.365616700000004,
+    "equity_after": 49.389068120000005,
+    "peak": 50.3647689,
+    "drawdown": 0.019372684543381213
+  },
+  {
+    "idx": 6,
+    "pair": "ICP/USDT",
+    "close_date": "2026-01-19 04:25:00+00:00",
+    "profit_ratio": 0.017229801077782075,
+    "profit_abs": 0.16794693,
+    "equity_before": 49.389068120000005,
+    "equity_after": 49.557015050000004,
+    "peak": 50.3647689,
+    "drawdown": 0.01603807319366053
+  },
+  {
+    "idx": 7,
+    "pair": "VET/USDT",
+    "close_date": "2026-01-19 04:30:00+00:00",
+    "profit_ratio": 0,
+    "profit_abs": 0,
+    "equity_before": 49.557015050000004,
+    "equity_after": 49.557015050000004,
+    "peak": 50.3647689,
+    "drawdown": 0.01603807319366053
+  },
+  {
+    "idx": 8,
+    "pair": "DOT/USDT",
+    "close_date": "2026-01-19 04:45:00+00:00",
+    "profit_ratio": 0,
+    "profit_abs": 0,
+    "equity_before": 49.557015050000004,
+    "equity_after": 49.557015050000004,
+    "peak": 50.3647689,
+    "drawdown": 0.01603807319366053
+  },
+  {
+    "idx": 9,
+    "pair": "VET/USDT",
+    "close_date": "2026-01-29 17:15:00+00:00",
+    "profit_ratio": 0.029970029970029972,
+    "profit_abs": 0.294345,
+    "equity_before": 49.557015050000004,
+    "equity_after": 49.851360050000004,
+    "peak": 50.3647689,
+    "drawdown": 0.010193809307839346
+  },
+  {
+    "idx": 10,
+    "pair": "VET/USDT",
+    "close_date": "2026-01-31 15:05:00+00:00",
+    "profit_ratio": 0.021278721582357003,
+    "profit_abs": 0.21023931,
+    "equity_before": 49.851360050000004,
+    "equity_after": 50.06159936,
+    "peak": 50.3647689,
+    "drawdown": 0.006019476443979056
+  },
+  {
+    "idx": 11,
+    "pair": "DOT/USDT",
+    "close_date": "2026-01-31 15:05:00+00:00",
+    "profit_ratio": 0.021278721177400355,
+    "profit_abs": 0.2100131,
+    "equity_before": 50.06159936,
+    "equity_after": 50.27161246,
+    "peak": 50.3647689,
+    "drawdown": 0.0018496350134151282
+  },
+  {
+    "idx": 12,
+    "pair": "VET/USDT",
+    "close_date": "2026-01-31 18:40:00+00:00",
+    "profit_ratio": -0.03295339865725508,
+    "profit_abs": -0.32832286,
+    "equity_before": 50.27161246,
+    "equity_after": 49.9432896,
+    "peak": 50.3647689,
+    "drawdown": 0.00836853437840358
+  },
+  {
+    "idx": 13,
+    "pair": "ADA/USDT",
+    "close_date": "2026-01-31 18:40:00+00:00",
+    "profit_ratio": -0.033513854566486145,
+    "profit_abs": -0.3336789,
+    "equity_before": 49.9432896,
+    "equity_after": 49.6096107,
+    "peak": 50.3647689,
+    "drawdown": 0.014993778716614023
+  },
+  {
+    "idx": 14,
+    "pair": "ICP/USDT",
+    "close_date": "2026-01-31 18:40:00+00:00",
+    "profit_ratio": -0.03339581766548059,
+    "profit_abs": -0.33203232,
+    "equity_before": 49.6096107,
+    "equity_after": 49.277578379999994,
+    "peak": 50.3647689,
+    "drawdown": 0.02158632996328525
+  },
+  {
+    "idx": 15,
+    "pair": "DOT/USDT",
+    "close_date": "2026-01-31 18:40:00+00:00",
+    "profit_ratio": -0.0332895923289519,
+    "profit_abs": -0.33167464,
+    "equity_before": 49.277578379999994,
+    "equity_after": 48.94590373999999,
+    "peak": 50.3647689,
+    "drawdown": 0.02817177942019724
+  },
+  {
+    "idx": 16,
+    "pair": "VET/USDT",
+    "close_date": "2026-01-31 19:10:00+00:00",
+    "profit_ratio": 0.021278720959165876,
+    "profit_abs": 0.20642441,
+    "equity_before": 48.94590373999999,
+    "equity_after": 49.15232814999999,
+    "peak": 50.3647689,
+    "drawdown": 0.024073191964949395
+  },
+  {
+    "idx": 17,
+    "pair": "DOT/USDT",
+    "close_date": "2026-01-31 19:10:00+00:00",
+    "profit_ratio": 0.02127872148501861,
+    "profit_abs": 0.20629178,
+    "equity_before": 49.15232814999999,
+    "equity_after": 49.35861992999999,
+    "peak": 50.3647689,
+    "drawdown": 0.01997723789813741
+  },
+  {
+    "idx": 18,
+    "pair": "ICP/USDT",
+    "close_date": "2026-01-31 21:35:00+00:00",
+    "profit_ratio": 0.029970029970029972,
+    "profit_abs": 0.2926032,
+    "equity_before": 49.35861992999999,
+    "equity_after": 49.65122312999999,
+    "peak": 50.3647689,
+    "drawdown": 0.014167557711160475
+  }
+]

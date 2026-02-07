@@ -68,24 +68,7 @@ export function CenterPanel({
   children,
 }: CenterPanelProps) {
   const editorRef = useRef<CodeEditorHandle>(null);
-  const [diffMounted, setDiffMounted] = useState(false);
   const diffEditorRef = useRef<string>(Math.random().toString(36).slice(2));
-  const [diffEditorKey, setDiffEditorKey] = useState(0);
-
-  useEffect(() => {
-    if (centerMode === "diff" && diffState) {
-      const timer = setTimeout(() => setDiffMounted(true), 50);
-      return () => clearTimeout(timer);
-    } else {
-      setDiffMounted(false);
-    }
-  }, [centerMode, diffState]);
-
-  useEffect(() => {
-    if (centerMode === "diff" && diffState) {
-      setDiffEditorKey((k) => k + 1);
-    }
-  }, [centerMode, diffState?.before, diffState?.after]);
 
   const { data: diagnosticReports, isLoading: isDiagnosticLoading } = useQuery<DiagnosticReport[]>({
     queryKey: [lastBacktestId ? `/api/diagnostic/reports/${lastBacktestId}` : ""],
@@ -176,36 +159,34 @@ export function CenterPanel({
       </div>
 
       <div className="flex-1 min-h-0 p-3">
-        {centerMode === "diff" ? (
+        {centerMode === "diff" || diffState ? (
           diffState ? (
-            <div className="h-full rounded-md border border-white/10 overflow-hidden">
-              {diffMounted && (
-                <DiffEditor
-                  key="diff-editor-stable"
-                  height="100%"
-                  language="python"
-                  theme="vs-dark"
-                  original={diffState.before}
-                  modified={diffState.after}
-                  originalModelPath={`inmemory://centerpanel/${diffEditorRef.current}/diff/${diffEditorKey}/original.py`}
-                  modifiedModelPath={`inmemory://centerpanel/${diffEditorRef.current}/diff/${diffEditorKey}/modified.py`}
-                  options={{
-                    readOnly: true,
-                    renderSideBySide: true,
-                    minimap: { enabled: false },
-                    scrollBeyondLastLine: false,
-                    automaticLayout: true,
-                    fontSize: 13,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                />
-              )}
+            <div className={cn("h-full rounded-md border border-white/10 overflow-hidden", centerMode !== "diff" && "hidden")}>
+              <DiffEditor
+                key="diff-editor-stable"
+                height="100%"
+                language="python"
+                theme="vs-dark"
+                original={diffState.before}
+                modified={diffState.after}
+                originalModelPath={`inmemory://centerpanel/${diffEditorRef.current}/diff/original.py`}
+                modifiedModelPath={`inmemory://centerpanel/${diffEditorRef.current}/diff/modified.py`}
+                options={{
+                  readOnly: true,
+                  renderSideBySide: true,
+                  minimap: { enabled: false },
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  fontSize: 13,
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}
+              />
             </div>
-          ) : (
+          ) : centerMode === "diff" ? (
             <div className="h-full rounded-md border border-white/10 bg-black/20 flex items-center justify-center text-xs text-slate-400">
               No validated diff yet.
             </div>
-          )
+          ) : null
         ) : centerMode === "diagnostics" ? (
           <div className="h-full rounded-md border border-white/10 bg-black/20 overflow-hidden flex flex-col">
             <div className="px-3 py-2 border-b border-white/10 bg-black/30 text-xs text-slate-300">

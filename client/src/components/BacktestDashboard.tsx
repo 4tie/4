@@ -7,9 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { useBacktest, useBacktests, useRunBacktest, useRunBacktestBatch } from "@/hooks/use-backtests";
 import { useFiles } from "@/hooks/use-files";
-import { useGetConfig, useDownloadData } from "@/hooks/use-config";
+import { useGetConfig, useDownloadData, useUpdateConfig } from "@/hooks/use-config";
 import { Timeframes, type WidgetConfig, type WidgetId } from "@shared/schema";
 import { AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, ComposedChart } from 'recharts';
 import { Download, Loader2, TrendingUp, TrendingDown, Percent, DollarSign, Activity, Check, ChevronsUpDown, Eye, EyeOff, GripVertical, Settings2, BarChart3, LineChart as LineChartIcon, Calendar, X, Save as SaveIcon } from "lucide-react";
@@ -18,6 +19,8 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { reportErrorOnce } from "@/lib/reportError";
+import { useQueryClient } from "@tanstack/react-query";
+import { api } from "@shared/routes";
 
 import { usePreferences } from "@/hooks/use-preferences";
 import { useKeyboardShortcuts, getShortcutLabel, type Shortcut } from "@/hooks/use-keyboard-shortcuts";
@@ -39,10 +42,12 @@ export function BacktestDashboard({
   variant = "full",
   backtestId = null,
 }: BacktestDashboardProps) {
+  const queryClient = useQueryClient();
   const { data: backtests } = useBacktests();
   const { data: files } = useFiles();
   const runBacktest = useRunBacktest();
   const runBacktestBatch = useRunBacktestBatch();
+  const updateConfig = useUpdateConfig();
   const [selectedBacktestId, setSelectedBacktestId] = useState<number | null>(() => (variant === "resultsOnly" ? backtestId : null));
   const [streamBacktestId, setStreamBacktestId] = useState<number | null>(null);
   const lastStreamedLogIndexRef = useRef(0);
@@ -51,6 +56,13 @@ export function BacktestDashboard({
   const suppressStrategyNotifyRef = useRef(false);
   const maxOpenTradesManualRef = useRef(false);
   const maxOpenTradesAutoRef = useRef<number | null>(null);
+
+  const [fixPreviewOpen, setFixPreviewOpen] = useState(false);
+  const [fixPreviewTitle, setFixPreviewTitle] = useState<string>("");
+  const [fixPreviewDescription, setFixPreviewDescription] = useState<string>("");
+  const [fixPreviewDiff, setFixPreviewDiff] = useState<string>("");
+  const [fixPreviewError, setFixPreviewError] = useState<string>("");
+  const [fixPreviewBusy, setFixPreviewBusy] = useState(false);
 
   const { data: streamBacktest } = useBacktest(streamBacktestId);
 
@@ -598,6 +610,7 @@ export function BacktestDashboard({
   }, [backtests, selectedBatchId]);
 
   const selectedResults = selectedBacktest?.results as any | undefined;
+  const fixSuggestions = Array.isArray(selectedResults?.fixSuggestions) ? (selectedResults?.fixSuggestions as any[]) : [];
   const selectedTrades = Array.isArray(selectedResults?.trades) ? (selectedResults!.trades as any[]) : [];
   const wins = selectedTrades.filter((t) => parseFloat(String(t?.profit_ratio ?? "0")) > 0).length;
   const totalTrades = selectedTrades.length;
@@ -2000,8 +2013,146 @@ export function BacktestDashboard({
             </PopoverContent>
             </Popover>
           </div>
+
+          <Dialog open={fixPreviewOpen} onOpenChange={(open) => setFixPreviewOpen(open)}>
+            <DialogContent className="max-w-5xl">
+              <DialogHeader>
+                <DialogTitle>{fixPreviewTitle || "Fix Preview"}</DialogTitle>
+                {fixPreviewError ? (
+                  <DialogDescription className="text-destructive">{fixPreviewError}</DialogDescription>
+                ) : (
+                  <DialogDescription>{fixPreviewDescription || "Review the change before applying."}</DialogDescription>
+                )}
+              </DialogHeader>
+              <div className="max-h-[60vh] overflow-auto rounded-md border border-border bg-background/40 p-3">
+                <pre className="text-xs whitespace-pre-wrap">{fixPreviewDiff || "(No diff returned)"}</pre>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setFixPreviewOpen(false)}>
+                  Close
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           
           <div className="flex flex-col gap-6">
+            {fixSuggestions.length > 0 && (
+              <Card className="border-border bg-card shadow-md">
+                <CardHeader>
+                  <CardTitle className="text-base font-semibold">Suggested fixes</CardTitle>
+                  <CardDescription className="text-xs">
+                    Generated from the last backtest failure traceback. Preview before applying.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <div className="space-y-3">
+                    {fixSuggestions.map((sug, idx) => {
+                      const title = String(sug?.title || `Suggestion ${idx + 1}`);
+                      const kind = String(sug?.kind || "");
+                      const canPreview = kind === "strategy_edits";
+                      const canApply = kind === "strategy_edits" || kind === "config_patch";
+
+                      const preview = async () => {
+                        if (fixPreviewBusy) return;
+                        setFixPreviewBusy(true);
+                        setFixPreviewError("");
+                        setFixPreviewTitle(title);
+                        setFixPreviewDescription(kind === "config_patch" ? "This is a config patch." : "This is a strategy code patch.");
+                        setFixPreviewDiff("");
+                        setFixPreviewOpen(true);
+
+                        try {
+                          if (kind === "config_patch") {
+                            setFixPreviewDiff(JSON.stringify(sug?.patch ?? {}, null, 2));
+                            return;
+                          }
+
+                          const strategyPath = String(sug?.strategyPath || "");
+                          const edits = Array.isArray(sug?.edits) ? sug.edits : [];
+                          if (!strategyPath || edits.length === 0) {
+                            throw new Error("Missing strategyPath/edits in suggestion");
+                          }
+
+                          const res = await fetch(api.strategies.edit.path, {
+                            method: api.strategies.edit.method,
+                            headers: { "Content-Type": "application/json" },
+                            credentials: "include",
+                            body: JSON.stringify({ strategyPath, edits, dryRun: true }),
+                          });
+                          const json = await res.json().catch(() => ({} as any));
+                          if (!res.ok) {
+                            throw new Error(String((json as any)?.message || (json as any)?.details || "Failed to preview"));
+                          }
+                          setFixPreviewDiff(String((json as any)?.diff || ""));
+                        } catch (e: any) {
+                          setFixPreviewError(e?.message || String(e));
+                        } finally {
+                          setFixPreviewBusy(false);
+                        }
+                      };
+
+                      const apply = async () => {
+                        if (fixPreviewBusy) return;
+                        setFixPreviewBusy(true);
+                        try {
+                          if (kind === "config_patch") {
+                            await updateConfig.mutateAsync(sug?.patch ?? {});
+                            await queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] });
+                            log(`✓ Applied config patch: ${title}`);
+                            return;
+                          }
+
+                          const strategyPath = String(sug?.strategyPath || "");
+                          const edits = Array.isArray(sug?.edits) ? sug.edits : [];
+                          if (!strategyPath || edits.length === 0) {
+                            throw new Error("Missing strategyPath/edits in suggestion");
+                          }
+
+                          const res = await fetch(api.strategies.edit.path, {
+                            method: api.strategies.edit.method,
+                            headers: { "Content-Type": "application/json" },
+                            credentials: "include",
+                            body: JSON.stringify({ strategyPath, edits, dryRun: false }),
+                          });
+                          const json = await res.json().catch(() => ({} as any));
+                          if (!res.ok) {
+                            throw new Error(String((json as any)?.message || (json as any)?.details || "Failed to apply"));
+                          }
+
+                          await queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] });
+                          if (selectedBacktestId) {
+                            await queryClient.invalidateQueries({ queryKey: [api.backtests.get.path, selectedBacktestId] });
+                          }
+                          log(`✓ Applied strategy fix: ${title}`);
+                        } finally {
+                          setFixPreviewBusy(false);
+                        }
+                      };
+
+                      return (
+                        <div key={String(sug?.id || idx)} className="rounded-md border border-border p-3 bg-background/40">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="font-semibold text-sm truncate" title={title}>{title}</div>
+                              <div className="text-[10px] text-muted-foreground">{kind}</div>
+                            </div>
+                            <div className="flex gap-2 flex-shrink-0">
+                              <Button size="sm" variant="outline" disabled={!canPreview || fixPreviewBusy} onClick={preview}>
+                                Preview
+                              </Button>
+                              <Button size="sm" disabled={!canApply || fixPreviewBusy} onClick={apply}>
+                                Apply
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {batchRuns.length > 1 && (
               <Card className="border-border bg-card shadow-md" data-testid="batch-results">
                 <CardHeader>

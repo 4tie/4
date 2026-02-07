@@ -89,7 +89,7 @@ class UniversalMACD(IStrategy):
 
         # Just for show user the min and max of indicator in different coins to set inside hyperoptable variables.cuz
         # in different timeframes should change the min and max in hyperoptable variables.
-        # print(dataframe['umacd'].min(), dataframe['umacd'].max())
+        print(dataframe['umacd'].min(), dataframe['umacd'].max())
 
         return dataframe
 

@@ -287,7 +287,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateBacktestStatus(id: number, status: string, results?: any, logs?: string[]): Promise<Backtest> {
     const updates: any = { status };
-    if (results) updates.results = results;
+    if (results !== undefined) updates.results = results;
     
     // If logs are provided, we should set them directly as an array
     if (logs) updates.logs = Array.isArray(logs) ? logs : [String(logs)];

@@ -10,102 +10,207 @@ from pandas import DataFrame
 
 # Add your lib to import here
 import talib.abstract as ta
+import numpy as np
 
 
 class mabStra(IStrategy):
-
+    """
+    Enhanced Moving Average Crossover Strategy with Trend Filter and Volume Confirmation
+    
+    This strategy uses:
+    - Fast/Slow MA crossovers for entry signals
+    - Trend filter (SMA 200) to trade with the trend
+    - Volume surge confirmation for entries
+    - ATR-based trailing stop for exits
+    - Additional technical indicators for robustness
+    """
+    
     INTERFACE_VERSION: int = 3
-    # #################### RESULTS PASTE PLACE ####################
-    # ROI table:
+    
+    # Strategy settings
+    timeframe = '5m'
+    startup_candle_count: int = 200  # Need 200 candles for SMA 200
+    
+    # Disable short trading (long only strategy)
+    can_short: bool = False
+    
+    # ROI table - Fixed: keys should be integers (minutes), not strings
     minimal_roi = {
-        "0": 0.598,
-        "644": 0.166,
-        "3269": 0.115,
-        "7289": 0
+        0: 0.10,    # 10% at any duration
+        60: 0.05,   # 5% after 60 minutes
+        240: 0.02,  # 2% after 4 hours
+        1440: 0.01, # 1% after 24 hours
     }
+    
+    # Stoploss
+    stoploss = -0.1 # 10% stoploss
+    
+    # Trailing stop settings
+    trailing_stop = True
+    trailing_stop_positive = 0.02  # Activate trailing stop at 2% profit
+    trailing_stop_positive_offset = 0.04  # Offset from current price
+    trailing_only_offset_is_reached = False
+    # Add these parameters at the top of your class definition
 
-    # Stoploss:
-    stoploss = -0.05
-    # Buy hypers
-    timeframe = '4h'
-
-    # #################### END OF RESULT PLACE ####################
-
-    # buy params
-    buy_mojo_ma_timeframe = IntParameter(2, 100, default=7, space='buy')
-    buy_fast_ma_timeframe = IntParameter(2, 100, default=14, space='buy')
-    buy_slow_ma_timeframe = IntParameter(2, 100, default=28, space='buy')
-    buy_div_max = DecimalParameter(
-        0, 2, decimals=4, default=2.25446, space='buy')
-    buy_div_min = DecimalParameter(
-        0, 2, decimals=4, default=0.29497, space='buy')
-    # sell params
-    sell_mojo_ma_timeframe = IntParameter(2, 100, default=7, space='sell')
-    sell_fast_ma_timeframe = IntParameter(2, 100, default=14, space='sell')
-    sell_slow_ma_timeframe = IntParameter(2, 100, default=28, space='sell')
-    sell_div_max = DecimalParameter(
-        0, 2, decimals=4, default=1.54593, space='sell')
-    sell_div_min = DecimalParameter(
-        0, 2, decimals=4, default=2.81436, space='sell')
-
-    # Add this to populate_indicators
+    # Hyperoptable parameters - Buy side
+    buy_fast_ma_timeframe = IntParameter(5, 20, default=10, space='buy')
+    buy_slow_ma_timeframe = IntParameter(20, 50, default=30, space='buy')
+    buy_div_min = DecimalParameter(0.95, 0.99, default=0.98, decimals=3, space='buy')
+    buy_div_max = DecimalParameter(1.01, 1.05, default=1.02, decimals=3, space='buy')
+    buy_volume_multiplier = DecimalParameter(1.1, 2.0, default=1.2, decimals=1, space='buy')
+    
+    # Hyperoptable parameters - Sell side
+    sell_fast_ma_timeframe = IntParameter(5, 20, default=10, space='sell')
+    sell_slow_ma_timeframe = IntParameter(20, 50, default=30, space='sell')
+    sell_div_min = DecimalParameter(0.95, 0.99, default=0.98, decimals=3, space='sell')
+    sell_div_max = DecimalParameter(1.01, 1.05, default=1.02, decimals=3, space='sell')
+    
+    # ATR multiplier for trailing stop
+    atr_multiplier = DecimalParameter(1.5, 3.0, default=2.0, decimals=1, space='sell')
+    
+    # RSI parameters for additional filter
+    rsi_period = IntParameter(10, 20, default=14, space='buy')
+    rsi_min = IntParameter(20, 40, default=30, space='buy')
+    rsi_max = IntParameter(60, 80, default=70, space='sell')
+    
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # ... existing code ...
-    
-        # Add ATR for dynamic stoploss
+        """
+        Calculate all technical indicators used by the strategy
+        """
+        # Calculate moving averages for buy signals
+        dataframe['buy-fastMA'] = ta.SMA(dataframe['close'], timeperiod=self.buy_fast_ma_timeframe.value)
+        dataframe['buy-slowMA'] = ta.SMA(dataframe['close'], timeperiod=self.buy_slow_ma_timeframe.value)
+        
+        # Calculate moving averages for sell signals
+        dataframe['sell-fastMA'] = ta.SMA(dataframe['close'], timeperiod=self.sell_fast_ma_timeframe.value)
+        dataframe['sell-slowMA'] = ta.SMA(dataframe['close'], timeperiod=self.sell_slow_ma_timeframe.value)
+        
+        # Add ATR for trailing stop and volatility measurement
         dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
-    
-        # Add trend filter
-        dataframe['trend'] = ta.SMA(dataframe, timeperiod=200)
-    
+        
+        # Add trend filter (SMA 200)
+        dataframe['trend'] = ta.SMA(dataframe['close'], timeperiod=200)
+        
+        # Add RSI for additional confirmation
+        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=self.rsi_period.value)
+        
+        # Add EMA for additional trend confirmation
+        dataframe['ema_50'] = ta.EMA(dataframe['close'], timeperiod=50)
+        
+        # Add MACD for momentum confirmation
+        macd = ta.MACD(dataframe, fastperiod=12, slowperiod=26, signalperiod=9)
+        dataframe['macd'] = macd['macd']
+        dataframe['macd_signal'] = macd['macdsignal']
+        dataframe['macd_hist'] = macd['macdhist']
+        
+        # Add Bollinger Bands for volatility-based entries
+        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0, matype=0)
+        dataframe['bb_upper'] = bollinger['upperband']
+        dataframe['bb_middle'] = bollinger['middleband']
+        dataframe['bb_lower'] = bollinger['lowerband']
+        
+        # Calculate volume moving average
+        dataframe['volume_ma'] = ta.SMA(dataframe['volume'], timeperiod=20)
+        
         return dataframe
 
-    # Modify stoploss parameter to be ATR-based
-
-
-    # Modify populate_entry_trend
-    # Add volume filter to entry logic
-    # Add volume filter to entry logic
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Calculate volume moving average
-        volume_ma = ta.SMA(dataframe['volume'], timeperiod=20)
-    
+        """
+        Define entry conditions for long positions
+        """
+        # Entry conditions with multiple confirmations
         dataframe.loc[
             (
+                # Trend filter: Price above long-term trend
                 (dataframe['close'] > dataframe['trend']) &
-                (dataframe['volume'] > volume_ma * 1.2) &  # 20% above average volume
-                (dataframe['buy-mojoMA'].div(dataframe['buy-fastMA'])
-                    > self.div_threshold_low.value) &
-                (dataframe['buy-mojoMA'].div(dataframe['buy-fastMA'])
-                    < self.div_threshold_high.value) &
-                (dataframe['buy-fastMA'].div(dataframe['buy-slowMA'])
-                    > self.div_threshold_low.value) &
-                (dataframe['buy-fastMA'].div(dataframe['buy-slowMA'])
-                    < self.div_threshold_high.value)
+                
+                # Volume confirmation: Volume surge above average
+                (dataframe['volume'] > dataframe['volume_ma'] * self.buy_volume_multiplier.value) &
+                
+                # MA crossover condition: Fast MA close to Slow MA (crossover zone)
+                (dataframe['buy-fastMA'].div(dataframe['buy-slowMA']) > self.buy_div_min.value) &
+                (dataframe['buy-fastMA'].div(dataframe['buy-slowMA']) < self.buy_div_max.value) &
+                
+                # RSI filter: Not overbought
+                (dataframe['rsi'] < self.rsi_max.value) &
+                (dataframe['rsi'] > self.rsi_min.value) &
+                
+                # MACD confirmation: MACD above signal line (bullish momentum)
+                (dataframe['macd'] > dataframe['macd_signal']) &
+                
+                # Price not too far from Bollinger middle (avoid buying at extremes)
+                (dataframe['close'] < dataframe['bb_upper']) &
+                (dataframe['close'] > dataframe['bb_lower'])
             ),
             'enter_long'] = 1
-    
+        
         return dataframe
 
-    # Add trailing stop logic
-    # Add trailing stop logic
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Calculate trailing stop (2x ATR below low)
-        trailing_stop = dataframe['low'] - (2 * dataframe['atr'])
-    
+        """
+        Define exit conditions for long positions
+        """
+        # Calculate dynamic trailing stop based on ATR
+        trailing_stop = dataframe['low'] - (self.atr_multiplier.value * dataframe['atr'])
+        
+        # Exit conditions
         dataframe.loc[
             (
-                (dataframe['close'] < trailing_stop) |  # Trailing stop hit
-                # Keep existing exit logic
-                (dataframe['sell-fastMA'].div(dataframe['sell-mojoMA'])
-                    > self.div_threshold_low.value) &
-                (dataframe['sell-fastMA'].div(dataframe['sell-mojoMA'])
-                    < self.div_threshold_high.value) &
-                (dataframe['sell-slowMA'].div(dataframe['sell-fastMA'])
-                    > self.div_threshold_low.value) &
-                (dataframe['sell-slowMA'].div(dataframe['sell-fastMA'])
-                    < self.div_threshold_high.value)
+                # Trailing stop hit
+                (dataframe['close'] < trailing_stop) |
+                
+                # MA crossover exit: Fast MA diverges from Slow MA
+                (
+                    (dataframe['sell-fastMA'].div(dataframe['sell-slowMA']) > self.sell_div_max.value) |
+                    (dataframe['sell-fastMA'].div(dataframe['sell-slowMA']) < self.sell_div_min.value)
+                ) |
+                
+                # RSI overbought exit
+                (dataframe['rsi'] > self.rsi_max.value) |
+                
+                # MACD bearish crossover
+                (dataframe['macd'] < dataframe['macd_signal']) &
+                (dataframe['macd_hist'] < 0) |
+                
+                # Price below trend (trend reversal)
+                (dataframe['close'] < dataframe['trend'])
             ),
             'exit_long'] = 1
-    
+        
         return dataframe
+    
+    def custom_stoploss(self, pair: str, trade, current_time, current_rate, 
+                        current_profit, **kwargs) -> float:
+        """
+        Custom dynamic stoploss based on ATR
+        """
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        last_candle = dataframe.iloc[-1].squeeze()
+        
+        # Use ATR-based dynamic stoploss
+        atr = last_candle['atr']
+        atr_stop = -(self.atr_multiplier.value * atr / current_rate)
+        
+        # Return the more conservative stoploss
+        return max(self.stoploss, atr_stop)
+    
+    def confirm_trade_entry(self, pair: str, order_type: str, amount: float, 
+                           rate: float, time_in_force: str, current_time,
+                           entry_tag: str, side: str, **kwargs) -> bool:
+        """
+        Additional confirmation before placing entry order
+        """
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        last_candle = dataframe.iloc[-1].squeeze()
+        
+        # Additional safety checks
+        # Ensure ATR is not too high (avoid entering during extreme volatility)
+        if last_candle['atr'] > last_candle['close'] * 0.05:  # ATR > 5% of price
+            return False
+        
+        # Ensure volume is sufficient
+        if last_candle['volume'] < last_candle['volume_ma'] * 0.5:
+            return False
+        
+        return True
+

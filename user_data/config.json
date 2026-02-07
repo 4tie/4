@@ -10,6 +10,12 @@
   "dry_run_wallet": 50,
   "trading_mode": "spot",
   "timeframe": "5m",
+  "minimal_roi": {
+    "0": 0.10,
+    "60": 0.05,
+    "240": 0.02,
+    "1440": 0.01
+  },
   "cancel_open_orders_on_exit": true,
   "use_exit_signal": true,
   "entry_pricing": {
@@ -67,7 +73,12 @@
       "INJ/USDT",
       "GALA/USDT",
       "HBAR/USDT",
-      "VET/USDT"
+      "VET/USDT",
+      "CHR/USDT",
+      "XEM/USDT",
+      "XTZ/USDT",
+      "ZEC/USDT",
+      "XMR/USDT"
     ],
     "pair_blacklist": [],
     "ccxt_config": {
@@ -121,7 +132,12 @@
         "INJ/USDT",
         "GALA/USDT",
         "HBAR/USDT",
-        "VET/USDT"
+        "VET/USDT",
+        "CHR/USDT",
+        "XEM/USDT",
+        "XTZ/USDT",
+        "ZEC/USDT",
+        "XMR/USDT"
       ],
       "pair_blacklist": []
     }

@@ -226,10 +226,84 @@ async function validateStrategyCode(
     });
   }
 
+  // Strategy-wide validation: undefined Parameter references like self.buy_xxx.value
+  const paramRefsMap: Record<string, true> = {};
+  const refRe = /\bself\.([A-Za-z_][A-Za-z0-9_]*)\.value\b/g;
+  let refMatch: RegExpExecArray | null;
+  while ((refMatch = refRe.exec(code)) !== null) {
+    const name = String(refMatch[1] || "").trim();
+    if (name) paramRefsMap[name] = true;
+  }
+
+  const declaredParamsMap: Record<string, true> = {};
+  const declaredRe = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=\s*\w*Parameter\s*\(/gm;
+  let declMatch: RegExpExecArray | null;
+  while ((declMatch = declaredRe.exec(code)) !== null) {
+    const name = String(declMatch[1] || "").trim();
+    if (name) declaredParamsMap[name] = true;
+  }
+
+  const paramRefs = Object.keys(paramRefsMap);
+  const missingParams = paramRefs.filter((p) => !declaredParamsMap[p]);
+  if (missingParams.length > 0) {
+    warnings.push(
+      `Missing strategy parameters detected: ${missingParams.slice(0, 8).join(", ")}${missingParams.length > 8 ? "…" : ""}. ` +
+        "Freqtrade Parameters must be declared (e.g. IntParameter/DecimalParameter).",
+    );
+
+    // If we propose Parameter declarations, ensure IntParameter is imported.
+    const usesIntParameter = true;
+    const hasIntParameterImport = /\bIntParameter\b/.test(code) && /from\s+freqtrade\.strategy\s+import\s+[^\n]*\bIntParameter\b/.test(code);
+    if (usesIntParameter && !hasIntParameterImport) {
+      changes.push({
+        type: "add_helper",
+        description: "Add missing import: IntParameter",
+        snippet: "from freqtrade.strategy import IntParameter",
+      });
+      edits.push({
+        kind: "insert",
+        anchor: { kind: "after_imports" },
+        content: "from freqtrade.strategy import IntParameter\n",
+      });
+    }
+
+    const paramLines = missingParams
+      .map((name) => `    ${name} = IntParameter(1, 100, default=20)`)
+      .join("\n");
+    const declBlock = `\n\n${paramLines}\n`;
+
+    changes.push({
+      type: "add_helper",
+      description: `Declare missing strategy parameters (${missingParams.length})`,
+      snippet: paramLines,
+    });
+    edits.push({
+      kind: "insert",
+      anchor: { kind: "heuristic_params" },
+      content: declBlock,
+    } as any);
+  }
+
   // Hard validation: ensure Python code is syntactically valid
   const compileErr = await pythonCompileCheck(strategyName, code);
   if (compileErr) {
     errors.push(compileErr);
+  }
+
+  // Full-file validation: apply suggested edits (dry-run) then compile resulting code.
+  if (errors.length === 0 && Array.isArray(edits) && edits.length > 0) {
+    try {
+      const preview = await applyEditsDryRunToTempFile(strategyName, code, edits);
+      const nextContent = typeof (preview as any)?.content === "string" ? String((preview as any).content) : "";
+      if (nextContent) {
+        const afterErr = await pythonCompileCheck(strategyName, nextContent);
+        if (afterErr) {
+          errors.push(`Post-edit compile failed: ${afterErr}`);
+        }
+      }
+    } catch (e: any) {
+      errors.push(`Post-edit validation failed: ${e?.message || String(e)}`);
+    }
   }
   
   // Check for required methods
@@ -351,6 +425,46 @@ async function pythonCompileCheck(strategyName: string, code: string): Promise<s
     if (exitCode === 0) return null;
     const msg = String(stderr || "Python compile failed").trim();
     return msg ? `Python syntax error: ${msg}` : "Python syntax error";
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function applyEditsDryRunToTempFile(strategyPath: string, code: string, edits: any[]): Promise<{ content: string; diff?: string } | null> {
+  const base = path.basename(String(strategyPath || "strategy")).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "strategy-validate-edit-"));
+  const filePath = path.join(dir, base.endsWith(".py") ? base : `${base}.py`);
+
+  try {
+    await fs.writeFile(filePath, code, "utf8");
+    const projectRoot = process.cwd();
+    const scriptPath = path.join(projectRoot, "server", "utils", "strategy-ast", "edit_tools.py");
+
+    const payload = JSON.stringify({ edits, dryRun: true });
+    const { code: exitCode, stdout, stderr } = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const proc = spawn("python3", [scriptPath, "apply", filePath], { stdio: ["pipe", "pipe", "pipe"] });
+      let out = "";
+      let err = "";
+      proc.stdout.on("data", (d) => {
+        out += d.toString();
+      });
+      proc.stderr.on("data", (d) => {
+        err += d.toString();
+      });
+      proc.on("close", (c) => resolve({ code: c, stdout: out, stderr: err }));
+      proc.on("error", (e) => resolve({ code: 1, stdout: "", stderr: String((e as Error)?.message || e) }));
+      proc.stdin.write(payload);
+      proc.stdin.end();
+    });
+
+    if (exitCode !== 0) {
+      throw new Error(String(stderr || stdout || "Rejected change(s)").trim());
+    }
+
+    const parsed = JSON.parse(stdout || "{}") as any;
+    const contentOut = typeof parsed?.content === "string" ? String(parsed.content) : "";
+    if (!contentOut) return null;
+    return { content: contentOut, diff: typeof parsed?.diff === "string" ? String(parsed.diff) : undefined };
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }

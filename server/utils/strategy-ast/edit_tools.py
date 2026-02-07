@@ -340,6 +340,50 @@ def _resolve_anchor(anchor: Dict[str, Any], index: Dict[str, Any], lines: List[s
             return int(strategy["endLine"]), f"end of class {strategy.get('name')}"
         return len(lines), "end of module"
 
+    if kind == "heuristic_params":
+        # Insert near top of strategy class: after existing Parameter declarations (Assign/AnnAssign)
+        # and before the first method definition.
+        insert_at = 0
+        try:
+            current_src = "".join(lines)
+            tree = ast.parse(current_src)
+            strategy = _find_strategy_class(index)
+            cls_name = strategy.get("name") if isinstance(strategy, dict) else None
+            target_cls: Optional[ast.ClassDef] = None
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef) and (cls_name is None or node.name == cls_name):
+                    target_cls = node
+                    break
+
+            if target_cls is None:
+                return len(lines), "end of module"
+
+            class_line = int(getattr(target_cls, "lineno", 1) or 1)
+            last_param_end = 0
+            first_method_line = 0
+            for child in target_cls.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    first_method_line = int(getattr(child, "lineno", 0) or 0)
+                    break
+
+            for child in target_cls.body:
+                if first_method_line and int(getattr(child, "lineno", 0) or 0) >= first_method_line:
+                    break
+                parsed = _get_param_assignment(child)
+                if not parsed:
+                    continue
+                _, _, _, end_lineno = parsed
+                last_param_end = max(last_param_end, int(end_lineno or 0))
+
+            if last_param_end > 0:
+                insert_at = last_param_end
+            else:
+                insert_at = class_line
+        except Exception:
+            insert_at = len(lines)
+
+        return insert_at, "near top of strategy params"
+
     raise ValueError("invalid anchor kind")
 
 

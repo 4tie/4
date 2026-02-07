@@ -573,6 +573,15 @@ export function ChatPanel({
   const [hydrated, setHydrated] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
+  const [aiActionsCollapsed, setAiActionsCollapsed] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem("chat:aiActionsCollapsed");
+      if (raw == null) return false;
+      return raw === "true";
+    } catch {
+      return false;
+    }
+  });
   const [autoContext, setAutoContext] = useState<boolean>(() => {
     try {
       const raw = localStorage.getItem("chat:autoContext");
@@ -1402,6 +1411,14 @@ export function ChatPanel({
   }, [autoContext]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem("chat:aiActionsCollapsed", aiActionsCollapsed ? "true" : "false");
+    } catch {
+      // ignore
+    }
+  }, [aiActionsCollapsed]);
+
+  useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
@@ -1780,7 +1797,23 @@ export function ChatPanel({
 
       {Array.isArray(aiActions) && aiActions.length > 0 && (
         <div className="relative z-10 px-3 py-2 border-b border-border/30 bg-background/40 backdrop-blur">
-          <AIActionTimeline actions={aiActions} variant="compact" />
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              AI Actions
+              <span className="ml-1 text-[10px] text-muted-foreground/70">({aiActions.length})</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[10px] rounded-lg"
+              onClick={() => setAiActionsCollapsed((v) => !v)}
+              title={aiActionsCollapsed ? "Expand AI Actions" : "Collapse AI Actions"}
+            >
+              <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", aiActionsCollapsed ? "-rotate-90" : "rotate-0")} />
+              {aiActionsCollapsed ? "Show" : "Hide"}
+            </Button>
+          </div>
+          {!aiActionsCollapsed && <AIActionTimeline actions={aiActions} variant="compact" />}
         </div>
       )}
 
