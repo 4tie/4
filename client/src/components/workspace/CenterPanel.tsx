@@ -1,10 +1,10 @@
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, type ReactNode } from "react";
 import { DiffEditor } from "@monaco-editor/react";
 import { FileCode, GitCompare, BarChart3, Loader2, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { CodeEditor, type CodeEditorHandle } from "@/components/Editor";
+import { CodeEditor, type CodeEditorHandle, type EditorState } from "@/components/Editor";
 import { cn } from "@/lib/utils";
 import type { DiffState } from "@/lib/workspaceUtils";
 import { useQuery } from "@tanstack/react-query";
@@ -18,14 +18,7 @@ interface CenterPanelProps {
   diffState: DiffState | null;
   lastBacktest: unknown;
   isBacktestLoading?: boolean;
-  editorContent: string;
-  setEditorContent: (v: string) => void;
-  setIsDirty: (v: boolean) => void;
-  onSave: (value?: string) => Promise<void>;
-  editorState: { selectedCode: string; lineNumber: number; columnNumber: number };
-  setEditorState: (v: { selectedCode: string; lineNumber: number; columnNumber: number }) => void;
-  isDirty: boolean;
-  lastBacktestId: number | null;
+  lastBacktestId?: number | null;
   quickParams?: {
     enabled: boolean;
     timeframe?: {
@@ -46,8 +39,14 @@ interface CenterPanelProps {
       onChangeBacktest?: (maxOpenTrades: number) => void;
     };
   };
-  // Results view props (simplified)
-  children?: React.ReactNode;
+  editorContent: string;
+  setEditorContent: (v: string) => void;
+  setIsDirty: (dirty: boolean) => void;
+  onSave: (value: string) => Promise<void>;
+  editorState: EditorState;
+  setEditorState: (s: EditorState) => void;
+  isDirty: boolean;
+  children?: ReactNode;
 }
 
 export function CenterPanel({
@@ -57,6 +56,7 @@ export function CenterPanel({
   diffState,
   lastBacktest,
   isBacktestLoading,
+  quickParams,
   editorContent,
   setEditorContent,
   setIsDirty,
@@ -65,11 +65,12 @@ export function CenterPanel({
   setEditorState,
   isDirty,
   lastBacktestId,
-  quickParams,
   children,
 }: CenterPanelProps) {
   const editorRef = useRef<CodeEditorHandle>(null);
   const [diffMounted, setDiffMounted] = useState(false);
+  const diffEditorRef = useRef<number>(0);
+  const [diffEditorKey, setDiffEditorKey] = useState(0);
 
   useEffect(() => {
     if (centerMode === "diff" && diffState) {
@@ -79,6 +80,12 @@ export function CenterPanel({
       setDiffMounted(false);
     }
   }, [centerMode, diffState]);
+
+  useEffect(() => {
+    if (centerMode === "diff" && diffState) {
+      setDiffEditorKey((k) => k + 1);
+    }
+  }, [centerMode, diffState?.before, diffState?.after]);
 
   const { data: diagnosticReports, isLoading: isDiagnosticLoading } = useQuery<DiagnosticReport[]>({
     queryKey: [lastBacktestId ? `/api/diagnostic/reports/${lastBacktestId}` : ""],
@@ -174,12 +181,14 @@ export function CenterPanel({
             <div className="h-full rounded-md border border-white/10 overflow-hidden">
               {diffMounted && (
                 <DiffEditor
-                  key={`diff-${diffState.after.length}-${diffState.after.slice(0, 50)}`}
+                  key="diff-editor-stable"
                   height="100%"
                   language="python"
                   theme="vs-dark"
                   original={diffState.before}
                   modified={diffState.after}
+                  originalModelPath={`inmemory://centerpanel/${diffEditorRef.current}/diff/${diffEditorKey}/original.py`}
+                  modifiedModelPath={`inmemory://centerpanel/${diffEditorRef.current}/diff/${diffEditorKey}/modified.py`}
                   options={{
                     readOnly: true,
                     renderSideBySide: true,

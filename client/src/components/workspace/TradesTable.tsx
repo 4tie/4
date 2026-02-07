@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { fmtMoney, fmtPct, fmtDateTime, fmtDurationMinutes, toFiniteNumber, dateMs } from "@/lib/workspaceUtils";
 import type { TradesPageSize, TradesViewTab, PerPairSortKey } from "@/hooks/use-trade-results";
+import { TrendingUp, TrendingDown } from "lucide-react";
 
 interface TradesTableProps {
   allTrades: any[];
@@ -572,8 +573,24 @@ export function TradesTable({
                           const exitReason = typeof (t as any)?.exit_reason === "string" ? String((t as any).exit_reason) : "-";
 
                           return (
-                            <tr key={String((t as any)?.open_timestamp ?? idx)} className={cn("hover:bg-white/5", idx % 2 === 0 ? "bg-black/10" : "bg-black/0")}>
-                              <td className="px-2 py-2 font-semibold text-slate-100 whitespace-nowrap">{pair}</td>
+                            <tr 
+                              key={String((t as any)?.open_timestamp ?? idx)} 
+                              className={cn(
+                                "transition-colors",
+                                idx % 2 === 0 ? "bg-black/10" : "bg-black/0",
+                                "hover:bg-white/5",
+                                positive ? "hover:bg-emerald-500/10" : "hover:bg-red-500/10"
+                              )}
+                            >
+                              <td className="px-2 py-2 font-semibold text-slate-100 whitespace-nowrap">
+                                <span className={cn(
+                                  "inline-flex items-center gap-1.5",
+                                  positive ? "text-emerald-400" : "text-red-400"
+                                )}>
+                                  {positive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                                  {pair}
+                                </span>
+                              </td>
                               <td className="px-2 py-2 text-slate-200 whitespace-nowrap">{openDate}</td>
                               <td className="px-2 py-2 text-slate-200 whitespace-nowrap">{closeDate}</td>
                               <td className="px-2 py-2 text-slate-300 whitespace-nowrap">{fmtDurationMinutes(durationMin)}</td>

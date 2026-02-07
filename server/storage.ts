@@ -39,6 +39,7 @@ export interface IStorage {
   getFile(id: number): Promise<File | undefined>;
   getFileByPath(path: string): Promise<File | undefined>;
   createFile(file: InsertFile): Promise<File>;
+  upsertFile(file: InsertFile): Promise<File>;
   updateFile(id: number, content: string): Promise<File>;
   deleteFile(id: number): Promise<void>;
   syncWithFilesystem(): Promise<void>;
@@ -48,6 +49,7 @@ export interface IStorage {
   getBacktest(id: number): Promise<Backtest | undefined>;
   createBacktest(backtest: InsertBacktest): Promise<Backtest>;
   updateBacktestStatus(id: number, status: string, results?: any, logs?: string[]): Promise<Backtest>;
+  updateBacktestError(id: number, error: string): Promise<Backtest>;
   appendBacktestLog(id: number, logLine: string): Promise<void>;
 
   // Diagnostics
@@ -162,7 +164,8 @@ export class DatabaseStorage implements IStorage {
           await this.updateFile(existing.id, content);
         }
       } else {
-        await this.createFile({
+        // Use upsert pattern - update if exists, otherwise insert
+        await this.upsertFile({
           path: filePath,
           content,
           type: "python"
@@ -179,7 +182,7 @@ export class DatabaseStorage implements IStorage {
           await this.updateFile(existingConfig.id, configContent);
         }
       } else {
-        await this.createFile({
+        await this.upsertFile({
           path: configFile,
           content: configContent,
           type: "json"
@@ -214,6 +217,20 @@ export class DatabaseStorage implements IStorage {
     }
     
     return file;
+  }
+
+  async upsertFile(insertFile: InsertFile): Promise<File> {
+    // First try to update existing file
+    const existing = await this.getFileByPath(insertFile.path);
+    if (existing) {
+      if (existing.content !== insertFile.content) {
+        return this.updateFile(existing.id, insertFile.content);
+      }
+      return existing;
+    }
+    
+    // If not exists, create new file
+    return this.createFile(insertFile);
   }
 
   async updateFile(id: number, content: string): Promise<File> {
@@ -277,6 +294,17 @@ export class DatabaseStorage implements IStorage {
     
     const [updated] = await db.update(backtests)
       .set(updates)
+      .where(eq(backtests.id, id))
+      .returning();
+    return updated;
+  }
+
+  async updateBacktestError(id: number, error: string): Promise<Backtest> {
+    const [updated] = await db.update(backtests)
+      .set({ 
+        status: "failed",
+        results: sql`jsonb_set(coalesce(results, '{}'::jsonb), '{error}', ${JSON.stringify(error)})`
+      })
       .where(eq(backtests.id, id))
       .returning();
     return updated;

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -46,6 +46,7 @@ export function StrategyValidationDialog({
   const [activeTab, setActiveTab] = useState("preview");
   const [applied, setApplied] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [editorKey, setEditorKey] = useState(0);
 
   useEffect(() => {
     if (open) {
@@ -55,6 +56,13 @@ export function StrategyValidationDialog({
       setMounted(false);
     }
   }, [open]);
+
+  // Reset editor key when dialog opens with new result
+  useEffect(() => {
+    if (result) {
+      setEditorKey(prev => prev + 1);
+    }
+  }, [result?.code]);
 
   useEffect(() => {
     if (open && !result && !validating) {
@@ -84,12 +92,15 @@ export function StrategyValidationDialog({
 
   const handleApply = async () => {
     if (!result?.code) return;
+    if (!result.valid) return;
     await onApply(result.code);
     setApplied(true);
   };
 
   const handleSave = async () => {
     if (!result?.code) return;
+    if (!result.valid) return;
+    if (!applied) return;
     await onSave(result.code);
     onOpenChange(false);
     setResult(null);
@@ -166,29 +177,145 @@ export function StrategyValidationDialog({
                   Warnings ({result.warnings.length})
                 </TabsTrigger>
               )}
+              <TabsTrigger value="diff_raw" className="data-[state=active]:bg-white/10">
+                <Diff className="w-4 h-4 mr-1" />
+                Validated Diff
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="preview" className="flex-1 min-h-0 mt-0 pt-4">
-              <div className="h-full rounded-md border border-white/10 overflow-hidden">
-                {mounted && result && (
-                  <DiffEditor
-                    key={`diff-${result.code.length}-${result.code.slice(0, 50)}`}
-                    height="100%"
-                    language="python"
-                    theme="vs-dark"
-                    original={originalCode}
-                    modified={result.code}
-                    options={{
-                      readOnly: true,
-                      renderSideBySide: true,
-                      minimap: { enabled: false },
-                      scrollBeyondLastLine: false,
-                      automaticLayout: true,
-                      fontSize: 13,
-                      fontFamily: "'JetBrains Mono', monospace",
-                    }}
-                  />
-                )}
+              <div className="flex flex-col h-full gap-4">
+                <div className="grid grid-cols-2 gap-4 h-[45%]">
+                  <div className="flex flex-col min-h-0 border border-white/10 rounded-lg overflow-hidden bg-black/20">
+                    <div className="px-3 py-1.5 bg-white/5 border-b border-white/10 flex items-center justify-between">
+                      <span className="text-xs font-medium text-slate-400">Original Logic</span>
+                      <Badge variant="outline" className="text-[10px] py-0 border-white/10 text-slate-500">ReadOnly</Badge>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      {mounted && result && (
+                        <DiffEditor
+                          key={`original-${editorKey}`}
+                          height="100%"
+                          language="python"
+                          theme="vs-dark"
+                          original={originalCode}
+                          modified={originalCode}
+                          originalModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/original-view.py`}
+                          modifiedModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/original-view.py`}
+                          options={{
+                            readOnly: true,
+                            renderSideBySide: false,
+                            minimap: { enabled: false },
+                            lineNumbers: "on",
+                            folding: true,
+                            fontSize: 12,
+                            fontFamily: "'JetBrains Mono', monospace",
+                            automaticLayout: true,
+                            scrollBeyondLastLine: false,
+                          }}
+                        />
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-col min-h-0 border border-purple-500/20 rounded-lg overflow-hidden bg-purple-500/5">
+                    <div className="px-3 py-1.5 bg-purple-500/10 border-b border-purple-500/20 flex items-center justify-between">
+                      <span className="text-xs font-medium text-purple-300">AI Proposed Improvement</span>
+                      <Badge className="bg-purple-500/20 text-purple-300 border-purple-500/30 text-[10px] py-0">Improved</Badge>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      {mounted && result && (
+                        <DiffEditor
+                          key={`improved-${editorKey}`}
+                          height="100%"
+                          language="python"
+                          theme="vs-dark"
+                          original={result.code}
+                          modified={result.code}
+                          originalModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/improved-view.py`}
+                          modifiedModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/improved-view.py`}
+                          options={{
+                            readOnly: true,
+                            renderSideBySide: false,
+                            minimap: { enabled: false },
+                            lineNumbers: "on",
+                            folding: true,
+                            fontSize: 12,
+                            fontFamily: "'JetBrains Mono', monospace",
+                            automaticLayout: true,
+                            scrollBeyondLastLine: false,
+                          }}
+                        />
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="h-[55%] rounded-lg border border-white/10 overflow-hidden bg-black/40 flex flex-col">
+                  <div className="px-3 py-1.5 bg-white/5 border-b border-white/10 flex items-center gap-2">
+                    <Diff className="w-3.5 h-3.5 text-blue-400" />
+                    <span className="text-xs font-medium text-slate-300">Comparative Diff</span>
+                  </div>
+                  <div className="flex-1 min-h-0">
+                    {mounted && result && (
+                      <DiffEditor
+                        key={`diff-${editorKey}`}
+                        height="100%"
+                        language="python"
+                        theme="vs-dark"
+                        original={originalCode}
+                        modified={result.code}
+                        originalModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/diff-original.py`}
+                        modifiedModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/diff-modified.py`}
+                        options={{
+                          readOnly: true,
+                          renderSideBySide: true,
+                          minimap: { enabled: false },
+                          scrollBeyondLastLine: false,
+                          automaticLayout: true,
+                          fontSize: 12,
+                          fontFamily: "'JetBrains Mono', monospace",
+                          diffWordWrap: "on",
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="diff_raw" className="flex-1 min-h-0 mt-0 pt-4">
+              <div className="h-full rounded-md border border-white/10 bg-black/40 overflow-hidden flex flex-col">
+                <div className="px-4 py-2 border-b border-white/10 bg-white/5 flex items-center justify-between">
+                  <span className="text-sm font-medium text-slate-300">Validated Unified Diff</span>
+                  <div className="flex gap-4 text-[10px] uppercase tracking-wider font-bold">
+                    <span className="text-emerald-400">+ Additions</span>
+                    <span className="text-red-400">- Deletions</span>
+                  </div>
+                </div>
+                <ScrollArea className="flex-1">
+                  <div className="p-4 font-mono text-xs leading-relaxed">
+                    {result.diff.split('\n').map((line, i) => {
+                      const isAdded = line.startsWith('+') && !line.startsWith('+++');
+                      const isRemoved = line.startsWith('-') && !line.startsWith('---');
+                      const isHeader = line.startsWith('@@') || line.startsWith('---') || line.startsWith('+++');
+                      
+                      return (
+                        <div 
+                          key={i} 
+                          className={cn(
+                            "whitespace-pre py-0.5 px-2 -mx-2 rounded-sm",
+                            isAdded && "bg-emerald-500/10 text-emerald-300 border-l-2 border-emerald-500",
+                            isRemoved && "bg-red-500/10 text-red-300 border-l-2 border-red-500",
+                            isHeader && "text-blue-400 font-bold bg-blue-500/5",
+                            !isAdded && !isRemoved && !isHeader && "text-slate-400 opacity-80"
+                          )}
+                        >
+                          {line}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </ScrollArea>
               </div>
             </TabsContent>
 
@@ -273,6 +400,11 @@ export function StrategyValidationDialog({
           </Button>
           {result && !validating && (
             <>
+              {!result.valid && (
+                <div className="mr-auto text-xs text-red-300/80">
+                  Fix validation errors before applying or saving.
+                </div>
+              )}
               <Button
                 variant="outline"
                 onClick={handleValidate}
@@ -306,7 +438,7 @@ export function StrategyValidationDialog({
               </Button>
               <Button
                 onClick={handleSave}
-                disabled={!applied}
+                disabled={!applied || !result.valid}
                 className="bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-500 hover:to-purple-600 text-white"
               >
                 <Save className="w-4 h-4 mr-1" />

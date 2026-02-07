@@ -4,6 +4,10 @@ import { db } from "../db";
 import { aiStrategyValidations } from "@shared/schema";
 import { eq, desc } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
+import path from "path";
+import os from "os";
+import fs from "fs/promises";
+import { spawn } from "child_process";
 
 const router = express.Router();
 
@@ -156,6 +160,12 @@ async function validateStrategyCode(
   const errors: string[] = [];
   const warnings: string[] = [];
   const changes: any[] = [];
+
+  // Hard validation: ensure Python code is syntactically valid
+  const compileErr = await pythonCompileCheck(strategyName, code);
+  if (compileErr) {
+    errors.push(compileErr);
+  }
   
   // Check for required methods
   if (!code.includes("def populate_indicators") && !code.includes("def populate_buy_trend")) {
@@ -261,6 +271,32 @@ async function validateStrategyCode(
     diff: diffLines.join("\n"),
     changes,
   };
+}
+
+async function pythonCompileCheck(strategyName: string, code: string): Promise<string | null> {
+  const base = path.basename(String(strategyName || "strategy")).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "strategy-validate-"));
+  const filePath = path.join(dir, base.endsWith(".py") ? base : `${base}.py`);
+
+  try {
+    await fs.writeFile(filePath, code, "utf8");
+
+    const { code: exitCode, stderr } = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+      const proc = spawn("python3", ["-m", "py_compile", filePath], { stdio: ["ignore", "ignore", "pipe"] });
+      let err = "";
+      proc.stderr.on("data", (d) => {
+        err += d.toString();
+      });
+      proc.on("close", (c) => resolve({ code: c, stderr: err }));
+      proc.on("error", (e) => resolve({ code: 1, stderr: String((e as Error)?.message || e) }));
+    });
+
+    if (exitCode === 0) return null;
+    const msg = String(stderr || "Python compile failed").trim();
+    return msg ? `Python syntax error: ${msg}` : "Python syntax error";
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 /**

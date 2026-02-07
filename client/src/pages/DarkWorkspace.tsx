@@ -291,7 +291,7 @@ export default function DarkWorkspace() {
               timeframe: {
                 value: quickBacktest.quickTimeframe,
                 options: ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"],
-                onChangeBacktest: (tf) => {
+                onChangeBacktest: (tf: string) => {
                   quickBacktest.setQuickConfigTouched(true);
                   const allowed = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
                   const next = (allowed as readonly string[]).includes(tf) ? (tf as (typeof allowed)[number]) : "4h";

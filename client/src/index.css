@@ -171,6 +171,46 @@
   --gradient-start: 272 92% 62%;
   --gradient-mid: 0 84% 56%;
   --gradient-end: 315 85% 60%;
+
+  /* Trading-specific semantic tokens */
+  --profit: 142 71% 45%;
+  --profit-bg: 142 71% 45%;
+  --profit-border: 142 71% 35%;
+  --profit-glow: 142 71% 45%;
+
+  --loss: 0 63% 50%;
+  --loss-bg: 0 63% 50%;
+  --loss-border: 0 63% 40%;
+  --loss-glow: 0 63% 50%;
+
+  --neutral: 215 20% 65%;
+  --neutral-bg: 215 20% 65%;
+  --neutral-border: 215 20% 55%;
+
+  --warning: 48 96% 53%;
+  --warning-bg: 48 96% 53%;
+  --warning-border: 48 96% 43%;
+
+  --info: 217 91% 60%;
+  --info-bg: 217 91% 60%;
+  --info-border: 217 91% 50%;
+
+  /* Card variants */
+  --card-profit: 142 71% 8%;
+  --card-loss: 0 63% 8%;
+  --card-warning: 48 96% 8%;
+  --card-info: 217 91% 8%;
+
+  /* Table styling */
+  --table-header: 260 40% 12%;
+  --table-row: 255 55% 6%;
+  --table-row-hover: 260 40% 10%;
+  --table-border: 270 35% 15%;
+
+  /* Editor styling */
+  --editor-bg: 222 47% 8%;
+  --editor-line-number: 215 20% 40%;
+  --editor-selection: 272 92% 62%;
 }
 
 @layer base {

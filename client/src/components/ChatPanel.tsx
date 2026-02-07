@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, PanelRightClose, PanelRightOpen, Zap, BarChart3, Eye, Check, ChevronDown, RefreshCw, Database } from "lucide-react";
+import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, PanelRightClose, PanelRightOpen, Zap, BarChart3, Eye, Check, ChevronDown, RefreshCw, Database, Sparkles, TrendingUp, Shield, Target } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -633,10 +633,10 @@ export function ChatPanel({
   const announcedCompletedRef = useRef<Set<number>>(new Set());
   const hasSelection = Boolean(context.selectedCode && String(context.selectedCode).trim().length > 0);
   const sessionKey = useMemo(() => {
+    // Strategy-only key for persistent chat that survives backtests and code changes
     const strategy = context.fileName ? String(context.fileName) : "global";
-    const backtest = context.lastBacktest?.id != null ? String(context.lastBacktest.id) : "none";
-    return `${strategy}::${backtest}`;
-  }, [context.fileName, context.lastBacktest?.id]);
+    return `strategy:${strategy}`;
+  }, [context.fileName]);
   const enclosingFunctionBlock = useMemo(() => {
     return inferEnclosingPythonFunctionBlockFromFile(context.fileContent, context.lineNumber);
   }, [context.fileContent, context.lineNumber]);
@@ -2323,6 +2323,60 @@ export function ChatPanel({
       </Dialog>
 
       <div className="p-3 border-t border-border/50 bg-background relative">
+        {/* AI Quick Actions */}
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setInput("Analyze my backtest results and suggest improvements")}
+            className="text-xs h-7 px-2 border-white/10 bg-white/5 hover:bg-white/10 text-slate-300"
+          >
+            <BarChart3 className="w-3 h-3 mr-1.5 text-purple-400" />
+            Analyze
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setInput("Optimize my strategy parameters for better risk-adjusted returns")}
+            className="text-xs h-7 px-2 border-white/10 bg-white/5 hover:bg-white/10 text-slate-300"
+          >
+            <TrendingUp className="w-3 h-3 mr-1.5 text-emerald-400" />
+            Optimize
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setInput("Explain how this strategy works and what each indicator does")}
+            className="text-xs h-7 px-2 border-white/10 bg-white/5 hover:bg-white/10 text-slate-300"
+          >
+            <Sparkles className="w-3 h-3 mr-1.5 text-blue-400" />
+            Explain
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setInput("Check for potential issues and suggest fixes")}
+            className="text-xs h-7 px-2 border-white/10 bg-white/5 hover:bg-white/10 text-slate-300"
+          >
+            <Shield className="w-3 h-3 mr-1.5 text-amber-400" />
+            Diagnose
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setInput("Add a new indicator to improve signal quality")}
+            className="text-xs h-7 px-2 border-white/10 bg-white/5 hover:bg-white/10 text-slate-300"
+          >
+            <Target className="w-3 h-3 mr-1.5 text-cyan-400" />
+            Add Indicator
+          </Button>
+        </div>
+
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Textarea
