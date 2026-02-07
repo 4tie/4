@@ -286,6 +286,41 @@ def _resolve_anchor(anchor: Dict[str, Any], index: Dict[str, Any], lines: List[s
             raise ValueError(f"anchor-not-found: function {name}")
         return int(found["endLine"]), f"after function {name}"
 
+    if kind == "after_imports":
+        # Insert after module docstring + import block.
+        # If there are no imports, insert after module docstring if present, otherwise at top.
+        insert_at = 0
+        try:
+            current_src = "".join(lines)
+            tree = ast.parse(current_src)
+
+            doc_end = 0
+            if tree.body:
+                first = tree.body[0]
+                if (
+                    isinstance(first, ast.Expr)
+                    and isinstance(getattr(first, "value", None), ast.Constant)
+                    and isinstance(getattr(first.value, "value", None), str)
+                ):
+                    doc_end = int(getattr(first, "end_lineno", getattr(first, "lineno", 1)) or 1)
+
+            last_import_end = 0
+            for node in tree.body:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    last_import_end = int(getattr(node, "end_lineno", getattr(node, "lineno", 1)) or 1)
+                    continue
+                # stop scanning once we leave the initial import section
+                if last_import_end > 0:
+                    break
+
+            insert_at = max(doc_end, last_import_end)
+        except Exception:
+            insert_at = 0
+
+        # _resolve_anchor expects a 0-based splice index for `lines[insert_at:insert_at]`.
+        # `insert_at` above is 1-based end_lineno, so it's already the correct slice index.
+        return insert_at, "after imports"
+
     if kind == "class_end":
         name = str(anchor.get("name") or "").strip()
         cls = _find_class(index, name) if name else _find_strategy_class(index)

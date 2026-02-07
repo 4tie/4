@@ -157,6 +157,7 @@ export const api = {
         ]);
         const strategyEditAnchorSchema = z.discriminatedUnion("kind", [
           z.object({ kind: z.literal("after_function"), name: z.string() }),
+          z.object({ kind: z.literal("after_imports") }),
           z.object({ kind: z.literal("class_end"), name: z.string().optional() }),
           z.object({ kind: z.literal("module_end") }),
           z.object({ kind: z.literal("heuristic_indicators") }),
