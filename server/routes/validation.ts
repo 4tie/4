@@ -34,9 +34,19 @@ const previewRequestSchema = z.object({
 router.post("/strategies/validate", async (req, res) => {
   try {
     const { strategyName, code, config } = validateRequestSchema.parse(req.body);
+
+    const strategyPath = String(strategyName || "").trim();
+    if (!strategyPath.startsWith("user_data/strategies/") || !strategyPath.endsWith(".py")) {
+      return res.status(400).json({ message: "strategyName must be a .py file under user_data/strategies/" });
+    }
+
+    const codeStr = String(code ?? "");
+    if (codeStr.length > 500_000) {
+      return res.status(413).json({ message: "Strategy code too large" });
+    }
     
     // Run validation logic
-    const validationResult = await validateStrategyCode(strategyName, code, config);
+    const validationResult = await validateStrategyCode(strategyPath, codeStr, config);
     
     // Store validation in database
     const validationId = uuidv4();
@@ -44,10 +54,11 @@ router.post("/strategies/validate", async (req, res) => {
     try {
       await db.insert(aiStrategyValidations).values({
         validationId,
-        strategyName,
-        originalCode: code,
+        strategyName: strategyPath,
+        originalCode: codeStr,
         modifiedCode: code,
         changes: validationResult.changes,
+        edits: validationResult.edits,
         errors: validationResult.errors,
         warnings: validationResult.warnings,
         valid: validationResult.valid,
@@ -79,6 +90,9 @@ router.post("/strategies/validate", async (req, res) => {
     });
   } catch (error) {
     console.error("Validation error:", error);
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ message: error.errors[0]?.message || "Invalid request" });
+    }
     res.status(500).json({ 
       message: "Validation failed", 
       error: (error as Error).message 
@@ -184,6 +198,33 @@ async function validateStrategyCode(
   const warnings: string[] = [];
   const changes: any[] = [];
   const edits: any[] = [];
+
+  // Static lint warnings (lookahead / suspicious patterns)
+  if (/\.shift\(\s*-\d+\s*\)/.test(code)) {
+    warnings.push("Potential lookahead bias: detected negative shift() usage (shift(-n)).");
+  }
+  if (/\.shift\(\s*-?1\s*\)/.test(code) && /\benter_long\b|\bbuy\b/.test(code)) {
+    warnings.push("Potential lookahead bias: detected shift(±1) usage. Review signal logic to ensure it doesn't use future candles.");
+  }
+  if (/merge\s*\(|merge_asof\s*\(|merge_ordered\s*\(/.test(code) && !code.includes("merge_informative_pair")) {
+    warnings.push("If you merge informative timeframes, prefer merge_informative_pair() to avoid lookahead bias.");
+  }
+
+  // Import auto-fix: DataFrame type used without import
+  const usesDataFrame = /\bDataFrame\b/.test(code);
+  const hasDataFrameImport = /from\s+pandas\s+import\s+DataFrame\b/.test(code) || /\bpandas\s+import\s+DataFrame\b/.test(code);
+  if (usesDataFrame && !hasDataFrameImport) {
+    changes.push({
+      type: "add_helper",
+      description: "Add missing import: from pandas import DataFrame",
+      snippet: "from pandas import DataFrame",
+    });
+    edits.push({
+      kind: "insert",
+      anchor: { kind: "after_imports" },
+      content: "from pandas import DataFrame\n",
+    });
+  }
 
   // Hard validation: ensure Python code is syntactically valid
   const compileErr = await pythonCompileCheck(strategyName, code);

@@ -2828,6 +2828,12 @@ export async function registerRoutes(
       const p = String((existing as any).path || "");
       const isStrategy = p.startsWith("user_data/strategies/") && p.endsWith(".py");
       if (isStrategy) {
+        if (!/^[a-zA-Z0-9_./-]+\.py$/.test(p) || p.includes("..")) {
+          return res.status(400).json({ message: "Strategy save rejected", details: "Invalid strategy path" });
+        }
+        if (typeof content === "string" && content.length > 500_000) {
+          return res.status(413).json({ message: "Strategy save rejected", details: "Strategy code too large" });
+        }
         const err = await pythonCompileCheckForSave(p, content);
         if (err) return res.status(400).json({ message: "Strategy save rejected", details: err });
       }

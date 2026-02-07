@@ -146,6 +146,7 @@ export const aiStrategyValidations = pgTable("ai_strategy_validations", {
   originalCode: text("original_code").notNull(),
   modifiedCode: text("modified_code").notNull(),
   changes: jsonb("changes").notNull(),
+  edits: jsonb("edits"),
   errors: text("errors").array(),
   warnings: text("warnings").array(),
   valid: boolean("valid").notNull(),
