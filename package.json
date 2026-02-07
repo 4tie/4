@@ -8,6 +8,7 @@
     "build": "node node_modules/tsx/dist/cli.cjs script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "node node_modules/typescript/bin/tsc",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "test": "node --import tsx script/test.ts",
     "db:push": "node node_modules/drizzle-kit/bin.cjs push"
   },

@@ -5,6 +5,7 @@ import { api } from "@shared/routes";
 import { z } from "zod";
 import { spawn } from "child_process";
 import path from "path";
+import os from "os";
 import fs from "fs/promises";
 import validationRouter from "./routes/validation";
 import { Phase1Structural } from "./utils/backtest-diagnostic/phase1-structural";
@@ -506,6 +507,31 @@ async function runPythonTool(scriptPath: string, args: string[], stdinObj?: any)
   });
 
   return { code, out, err };
+}
+
+async function pythonCompileCheckForSave(strategyPath: string, code: string): Promise<string | null> {
+  const base = path.basename(String(strategyPath || "strategy")).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "strategy-save-validate-"));
+  const filePath = path.join(dir, base.endsWith(".py") ? base : `${base}.py`);
+
+  try {
+    await fs.writeFile(filePath, code, "utf8");
+    const { code: exitCode, stderr } = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+      const proc = spawn("python3", ["-m", "py_compile", filePath], { stdio: ["ignore", "ignore", "pipe"] });
+      let err = "";
+      proc.stderr.on("data", (d) => {
+        err += d.toString();
+      });
+      proc.on("close", (c) => resolve({ code: c, stderr: err }));
+      proc.on("error", (e) => resolve({ code: 1, stderr: String((e as Error)?.message || e) }));
+    });
+
+    if (exitCode === 0) return null;
+    const msg = String(stderr || "Python compile failed").trim();
+    return msg ? `Python syntax error: ${msg}` : "Python syntax error";
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 async function chooseDiagnosticLoopFixWithAi(input: {
@@ -2287,7 +2313,11 @@ function extractFirstJsonObject(text: string): any | null {
 function isBacktestRelatedMessage(message: string): boolean {
   const m = String(message || "").toLowerCase();
   if (!m.trim()) return true;
-  if (/\b(backtest|results?|profit|loss|drawdown|dd|win\s*rate|winrate|trades?|roi|stoploss|trailing|sharpe|expectancy|profit\s*factor)\b/.test(m)) {
+  if (
+    /\b(backtest|results?|profit|loss|drawdown|dd|win\s*rate|winrate|trades?|roi|stoploss|trailing|sharpe|sortino|expectancy|profit\s*factor|risk\s*adjusted|risk-adjusted|optimi[sz]e|optimization|tune|tuning|parameters?|param(s)?|hyperopt)\b/.test(
+      m,
+    )
+  ) {
     return true;
   }
   if (/\b(analy|analysis|explain|interpret|improve|optimi|refine|why)\b/.test(m)) {
@@ -2791,7 +2821,18 @@ export async function registerRoutes(
   app.put(api.files.update.path, async (req, res) => {
     try {
       const { content } = api.files.update.input.parse(req.body);
-      const file = await storage.updateFile(Number(req.params.id), content);
+      const id = Number(req.params.id);
+      const existing = await storage.getFile(id);
+      if (!existing) return res.status(404).json({ message: "File not found" });
+
+      const p = String((existing as any).path || "");
+      const isStrategy = p.startsWith("user_data/strategies/") && p.endsWith(".py");
+      if (isStrategy) {
+        const err = await pythonCompileCheckForSave(p, content);
+        if (err) return res.status(400).json({ message: "Strategy save rejected", details: err });
+      }
+
+      const file = await storage.updateFile(id, content);
       res.json(file);
     } catch (err) {
       res.status(404).json({ message: "File not found" });
@@ -3250,6 +3291,7 @@ export async function registerRoutes(
             metrics_to_recommendation_mapping: z.array(z.string()).min(1).max(12),
             next_experiments: z.array(z.string()).min(1).max(6),
             questions: z.array(z.string()).optional(),
+            config_patch: z.record(z.any()).optional(),
             actions: z
               .array(
                 z.object({
@@ -3331,12 +3373,17 @@ export async function registerRoutes(
           "- Only reference metric keys that exist in METRICS_JSON.",
           "- Do not introduce numeric metric values in text (no percentages or figures). Refer to metrics by key only.",
           "- If info is missing, add it to 'questions' instead of assuming.",
+          "Parameter optimization rules:",
+          "- Prefer better risk-adjusted returns (reduce drawdown / improve stability) over raw profit.",
+          "- If you propose config changes, include a 'config_patch' object.",
+          "- config_patch must ONLY use allowed keys: timeframe, stake_amount, max_open_trades, tradable_balance_ratio, trailing_stop, trailing_stop_positive, trailing_stop_positive_offset, trailing_only_offset_is_reached, minimal_roi, stoploss, backtest_date_from, backtest_date_to, pairs.",
           "Output schema (JSON):",
           "- summary: string[] (1-8)",
           "- metrics_used?: string[] (subset of metric keys)",
           "- metrics_to_recommendation_mapping: string[] (format: <metric_key> -> <recommendation> (why))",
           "- next_experiments: string[] (top 3-6, ordered)",
           "- questions?: string[]",
+          "- config_patch?: object (only allowed keys; omit if not needed)",
           "- actions?: {action,payload,label?}[] where action is one of run_backtest/run_batch_backtest/run_diagnostic",
           "Constraints:",
           `- Allowed metric keys: ${allowedMetricKeys.join(", ")}`,
@@ -3353,10 +3400,10 @@ export async function registerRoutes(
 
         let modelOut: string | null = null;
         try {
-          modelOut = await callOpenRouterChat({ model, system, user, maxTokens: 700 });
+          modelOut = await callOpenRouterChat({ model, system, user, maxTokens: 700, strictModel: true });
         } catch (e: any) {
           const msg = String(e?.message || e || "AI request failed");
-          return res.status(502).json({ message: msg });
+          return res.status(502).json({ message: msg, details: { model } });
         }
 
         const containsPercentLiteral = (value: string): boolean => /-?\d+(?:\.\d+)?\s*%/.test(value);
@@ -3396,7 +3443,7 @@ export async function registerRoutes(
           ].join("\n");
           let repaired: string | null = null;
           try {
-            repaired = await callOpenRouterChat({ model, system: repairSystem, user: repairUser, maxTokens: 450 });
+            repaired = await callOpenRouterChat({ model, system: repairSystem, user: repairUser, maxTokens: 450, strictModel: true });
           } catch {
             repaired = null;
           }
@@ -3491,6 +3538,38 @@ export async function registerRoutes(
         out.push("");
         out.push("### Top next experiments");
         for (const exp of analysisObj.next_experiments) out.push(`- ${String(exp || "").trim()}`);
+
+        if (analysisObj.config_patch && typeof analysisObj.config_patch === "object" && !Array.isArray(analysisObj.config_patch)) {
+          const patch = analysisObj.config_patch as Record<string, any>;
+          const allowed = new Set([
+            "timeframe",
+            "stake_amount",
+            "max_open_trades",
+            "tradable_balance_ratio",
+            "trailing_stop",
+            "trailing_stop_positive",
+            "trailing_stop_positive_offset",
+            "trailing_only_offset_is_reached",
+            "minimal_roi",
+            "stoploss",
+            "backtest_date_from",
+            "backtest_date_to",
+            "pairs",
+          ]);
+
+          const filtered: Record<string, any> = {};
+          for (const [k, v] of Object.entries(patch)) {
+            if (allowed.has(k)) filtered[k] = v;
+          }
+
+          if (Object.keys(filtered).length > 0) {
+            out.push("");
+            out.push("### Suggested config changes");
+            out.push("```config");
+            out.push(JSON.stringify(filtered, null, 2));
+            out.push("```");
+          }
+        }
 
         if (Array.isArray(analysisObj.questions) && analysisObj.questions.length) {
           out.push("");
@@ -4299,15 +4378,23 @@ Run this checklist for every strategy:
       if (ctx?.fileName) systemPrompt += `\nUser is working on file: ${ctx.fileName}`;
       if (ctx?.lineNumber) systemPrompt += `\nCursor is at line: ${ctx.lineNumber}`;
       if (ctx?.cursorFunctionName) systemPrompt += `\nCursor is inside function: ${ctx.cursorFunctionName}`;
+      if (ctx?.lastBacktest && typeof ctx.lastBacktest === "object") {
+        const st = String((ctx.lastBacktest as any)?.status || "");
+        const err = String((ctx.lastBacktest as any)?.error || "");
+        const tail = String((ctx.lastBacktest as any)?.logTail || "");
+        if (st) systemPrompt += `\nLast backtest status: ${st}`;
+        if (err) systemPrompt += `\nLast backtest error: ${err}`;
+        if (tail.trim()) systemPrompt += `\n\nLast backtest log tail:\n\`\`\`\n${clampText(tail, 12000)}\n\`\`\``;
+      }
       if (ctx?.selectedCode) systemPrompt += `\n\nSelected code:\n\`\`\`\n${clampText(ctx.selectedCode, 6000)}\n\`\`\``;
       if (ctx?.fileContent) systemPrompt += `\n\nFile content:\n\`\`\`\n${clampText(ctx.fileContent, 22000)}\n\`\`\``;
 
       let aiResponse: string | null = null;
       try {
-        aiResponse = await callOpenRouterChat({ model, system: systemPrompt, user: message, maxTokens: 8000 });
+        aiResponse = await callOpenRouterChat({ model, system: systemPrompt, user: message, maxTokens: 8000, strictModel: true });
       } catch (e: any) {
         const msg = String(e?.message || e || "AI request failed");
-        return res.status(502).json({ message: msg });
+        return res.status(502).json({ message: msg, details: { model } });
       }
 
       const cleaned = typeof aiResponse === "string" ? aiResponse.trim() : "";

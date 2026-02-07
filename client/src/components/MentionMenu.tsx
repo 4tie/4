@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
-import { Globe, BarChart3, FileCode, Bot, Database } from "lucide-react";
+import { Globe, FileCode, Bot, Database, SlidersHorizontal } from "lucide-react";
 
 export interface MentionItem {
   id: string;
@@ -125,6 +125,7 @@ export const defaultMentionItems = (context: {
   onWebSearch?: () => void;
   onIncludeContext?: () => void;
   onIncludeCode?: () => void;
+  onOptimizeParams?: () => void;
 }): MentionItem[] => [
   {
     id: "web",
@@ -156,6 +157,17 @@ export const defaultMentionItems = (context: {
           icon: <FileCode className="w-3.5 h-3.5" />,
           description: "Include selected code snippet",
           action: context.onIncludeCode || (() => {}),
+        },
+      ]
+    : []),
+  ...(context.backtestResults
+    ? [
+        {
+          id: "optimize",
+          label: "Optimize Params",
+          icon: <SlidersHorizontal className="w-3.5 h-3.5" />,
+          description: "Tune parameters for better risk-adjusted returns",
+          action: context.onOptimizeParams || (() => {}),
         },
       ]
     : []),

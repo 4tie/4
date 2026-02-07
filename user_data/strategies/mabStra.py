@@ -25,7 +25,7 @@ class mabStra(IStrategy):
     }
 
     # Stoploss:
-    stoploss = -0.028
+    stoploss = -0.05
     # Buy hypers
     timeframe = '4h'
 
@@ -48,50 +48,64 @@ class mabStra(IStrategy):
     sell_div_min = DecimalParameter(
         0, 2, decimals=4, default=2.81436, space='sell')
 
+    # Add this to populate_indicators
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # SMA - ex Moving Average
-        dataframe['buy-mojoMA'] = ta.SMA(dataframe,
-                                         timeperiod=self.buy_mojo_ma_timeframe.value)
-        dataframe['buy-fastMA'] = ta.SMA(dataframe,
-                                         timeperiod=self.buy_fast_ma_timeframe.value)
-        dataframe['buy-slowMA'] = ta.SMA(dataframe,
-                                         timeperiod=self.buy_slow_ma_timeframe.value)
-        dataframe['sell-mojoMA'] = ta.SMA(dataframe,
-                                          timeperiod=self.sell_mojo_ma_timeframe.value)
-        dataframe['sell-fastMA'] = ta.SMA(dataframe,
-                                          timeperiod=self.sell_fast_ma_timeframe.value)
-        dataframe['sell-slowMA'] = ta.SMA(dataframe,
-                                          timeperiod=self.sell_slow_ma_timeframe.value)
+        # ... existing code ...
+    
+        # Add ATR for dynamic stoploss
+        dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
+    
+        # Add trend filter
+        dataframe['trend'] = ta.SMA(dataframe, timeperiod=200)
+    
         return dataframe
 
-    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+    # Modify stoploss parameter to be ATR-based
 
+
+    # Modify populate_entry_trend
+    # Add volume filter to entry logic
+    # Add volume filter to entry logic
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # Calculate volume moving average
+        volume_ma = ta.SMA(dataframe['volume'], timeperiod=20)
+    
         dataframe.loc[
             (
+                (dataframe['close'] > dataframe['trend']) &
+                (dataframe['volume'] > volume_ma * 1.2) &  # 20% above average volume
                 (dataframe['buy-mojoMA'].div(dataframe['buy-fastMA'])
-                    > self.buy_div_min.value) &
+                    > self.div_threshold_low.value) &
                 (dataframe['buy-mojoMA'].div(dataframe['buy-fastMA'])
-                    < self.buy_div_max.value) &
+                    < self.div_threshold_high.value) &
                 (dataframe['buy-fastMA'].div(dataframe['buy-slowMA'])
-                    > self.buy_div_min.value) &
+                    > self.div_threshold_low.value) &
                 (dataframe['buy-fastMA'].div(dataframe['buy-slowMA'])
-                    < self.buy_div_max.value)
+                    < self.div_threshold_high.value)
             ),
             'enter_long'] = 1
-
+    
         return dataframe
 
+    # Add trailing stop logic
+    # Add trailing stop logic
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # Calculate trailing stop (2x ATR below low)
+        trailing_stop = dataframe['low'] - (2 * dataframe['atr'])
+    
         dataframe.loc[
             (
+                (dataframe['close'] < trailing_stop) |  # Trailing stop hit
+                # Keep existing exit logic
                 (dataframe['sell-fastMA'].div(dataframe['sell-mojoMA'])
-                    > self.sell_div_min.value) &
+                    > self.div_threshold_low.value) &
                 (dataframe['sell-fastMA'].div(dataframe['sell-mojoMA'])
-                    < self.sell_div_max.value) &
+                    < self.div_threshold_high.value) &
                 (dataframe['sell-slowMA'].div(dataframe['sell-fastMA'])
-                    > self.sell_div_min.value) &
+                    > self.div_threshold_low.value) &
                 (dataframe['sell-slowMA'].div(dataframe['sell-fastMA'])
-                    < self.sell_div_max.value)
+                    < self.div_threshold_high.value)
             ),
             'exit_long'] = 1
+    
         return dataframe

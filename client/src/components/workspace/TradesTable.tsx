@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -41,6 +41,9 @@ interface TradesTableProps {
   tradeColWidths: Record<string, number>;
   startResizeTradeCol: (key: string) => (e: React.MouseEvent) => void;
   onSelectProfitablePairs?: (pairs: string[]) => void;
+  backtestStatus?: string;
+  backtestError?: string;
+  backtestLogTail?: string;
 }
 
 export function TradesTable({
@@ -68,7 +71,11 @@ export function TradesTable({
   tradeColWidths,
   startResizeTradeCol,
   onSelectProfitablePairs,
+  backtestStatus,
+  backtestError,
+  backtestLogTail,
 }: TradesTableProps) {
+  const [showLogs, setShowLogs] = useState(false);
   const perPairData = useMemo(() => {
     return tradePairs.map((p) => {
       const pairTrades = allTrades.filter((t: any) => String((t as any)?.pair) === p);
@@ -608,7 +615,37 @@ export function TradesTable({
                     </table>
                   </div>
                 ) : (
-                  <div className="text-xs text-slate-400">No trades match your filters.</div>
+                  <div className="space-y-2">
+                    {(backtestStatus && backtestStatus !== "completed") || backtestError || backtestLogTail ? (
+                      <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs text-slate-300">
+                            {backtestStatus ? `Backtest status: ${backtestStatus}` : "Backtest status: -"}
+                          </div>
+                          {backtestLogTail ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-[10px] border-white/10"
+                              onClick={() => setShowLogs((v) => !v)}
+                            >
+                              {showLogs ? "Hide logs" : "Show logs"}
+                            </Button>
+                          ) : null}
+                        </div>
+                        {backtestError ? (
+                          <div className="mt-2 text-xs text-red-300 whitespace-pre-wrap">{backtestError}</div>
+                        ) : null}
+                        {showLogs && backtestLogTail ? (
+                          <pre className="mt-2 max-h-52 overflow-auto rounded bg-black/40 p-2 text-[10px] leading-relaxed text-slate-300 whitespace-pre-wrap">
+                            {backtestLogTail}
+                          </pre>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    <div className="text-xs text-slate-400">No trades match your filters.</div>
+                  </div>
                 )
               ) : (
                 sortedPerPairData.length ? (

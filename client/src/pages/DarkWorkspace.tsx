@@ -16,6 +16,7 @@ import { useWorkspaceTheme } from "@/hooks/use-workspace-theme";
 import { useQuickBacktest } from "@/hooks/use-quick-backtest";
 import { useConnectionStatus } from "@/hooks/use-connection-status";
 import { useTradeResults } from "@/hooks/use-trade-results";
+import { useUpdateConfig } from "@/hooks/use-config";
 
 import { api } from "@shared/routes";
 import { reportError } from "@/lib/reportError";
@@ -51,6 +52,7 @@ export default function DarkWorkspace() {
   const [activeFileId, setActiveFileId] = useState<number | null>(null);
   const { data: activeFile } = useFile(activeFileId);
   const updateFile = useUpdateFile();
+  const updateConfig = useUpdateConfig();
 
   const activeFilePath = typeof (activeFile as any)?.path === "string" ? String((activeFile as any).path) : "";
   const isStrategyFile = Boolean(activeFilePath && activeFilePath.startsWith("user_data/strategies/") && activeFilePath.endsWith(".py"));
@@ -217,14 +219,57 @@ export default function DarkWorkspace() {
             config: (quickBacktest.configData && typeof quickBacktest.configData === "object" ? quickBacktest.configData : undefined) as any,
           })
         }
-        onApply={async (code: string) => {
+        onPreviewEdits={async ({ strategyPath, edits }) => {
+          const res = await fetch(api.strategies.edit.path, {
+            method: api.strategies.edit.method,
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ strategyPath, edits, dryRun: true }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const msg = typeof (data as any)?.message === "string" ? String((data as any).message) : "Rejected change(s)";
+            const details = typeof (data as any)?.details === "string" ? String((data as any).details) : "";
+            throw new Error(details ? `${msg}: ${details}` : msg);
+          }
+          return data;
+        }}
+        onApplyToEditor={async (code: string) => {
           editorRef.current?.applyCode(code);
           const next = editorRef.current?.getValue?.() ?? code;
           setEditorContent(next);
           setIsDirty(true);
         }}
-        onSave={async (code: string) => {
-          await handleSave(code);
+        onApplyEditsAndSave={async ({ strategyPath, edits }) => {
+          const res = await fetch(api.strategies.edit.path, {
+            method: api.strategies.edit.method,
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ strategyPath, edits, dryRun: false }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const msg = typeof (data as any)?.message === "string" ? String((data as any).message) : "Rejected change(s)";
+            const details = typeof (data as any)?.details === "string" ? String((data as any).details) : "";
+            throw new Error(details ? `${msg}: ${details}` : msg);
+          }
+          await queryClient.invalidateQueries({ queryKey: [api.files.list.path] });
+          await queryClient.invalidateQueries({ queryKey: [api.files.getByPath.path, strategyPath] });
+          if (activeFileId) {
+            await queryClient.invalidateQueries({ queryKey: [api.files.get.path, activeFileId] });
+          }
+        }}
+        onMarkValidation={async ({ validationId, applied, saved }) => {
+          const res = await fetch("/api/diagnostics/changes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ id: validationId, applied: Boolean(applied), saved: Boolean(saved) }),
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(typeof (data as any)?.message === "string" ? String((data as any).message) : "Failed to update validation state");
+          }
         }}
       />
 
@@ -338,6 +383,9 @@ export default function DarkWorkspace() {
               pagedTrades={tradeResults.pagedTrades}
               filteredTradesTotals={tradeResults.filteredTradesTotals}
               resultsSummary={tradeResults.resultsSummary}
+              backtestStatus={String((tradeResults.lastBacktest as any)?.status || "")}
+              backtestError={typeof (tradeResults.lastBacktest as any)?.results?.error === "string" ? (tradeResults.lastBacktest as any).results.error : undefined}
+              backtestLogTail={Array.isArray((tradeResults.lastBacktest as any)?.logs) ? (tradeResults.lastBacktest as any).logs.slice(-200).join("\n") : undefined}
               tradesViewTab={tradeResults.tradesViewTab}
               setTradesViewTab={tradeResults.setTradesViewTab}
               tradesFilterPair={tradeResults.tradesFilterPair}
@@ -395,7 +443,18 @@ export default function DarkWorkspace() {
                 selectedCode: editorState.selectedCode,
                 lineNumber: editorState.lineNumber,
                 columnNumber: editorState.columnNumber,
-                lastBacktest: tradeResults.lastBacktestId != null ? { id: tradeResults.lastBacktestId, strategyName: activeFilePath, config: (tradeResults.lastBacktest as any)?.config } : undefined,
+                lastBacktest: tradeResults.lastBacktestId != null
+                  ? {
+                      id: tradeResults.lastBacktestId,
+                      strategyName: activeFilePath,
+                      config: (tradeResults.lastBacktest as any)?.config,
+                      status: String((tradeResults.lastBacktest as any)?.status || ""),
+                      error: typeof (tradeResults.lastBacktest as any)?.results?.error === "string" ? (tradeResults.lastBacktest as any).results.error : undefined,
+                      logTail: Array.isArray((tradeResults.lastBacktest as any)?.logs)
+                        ? (tradeResults.lastBacktest as any).logs.slice(-120).join("\n")
+                        : undefined,
+                    }
+                  : undefined,
                 backtestResults: tradeResults.resultsSummary
                   ? {
                       profit_total: tradeResults.resultsSummary.profitPct ?? 0,
@@ -408,6 +467,10 @@ export default function DarkWorkspace() {
                   : undefined,
               }}
               onApplyCode={handleApplyCode}
+              onApplyConfig={async (patch) => {
+                await updateConfig.mutateAsync(patch as any);
+                quickBacktest.setQuickConfigTouched(true);
+              }}
               onApplyAndSaveCode={handleApplyAndSaveCode}
               onPreviewValidatedEdit={tradeResults.onPreviewValidatedEdit}
             />

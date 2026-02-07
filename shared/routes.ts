@@ -281,6 +281,9 @@ export const api = {
             id: z.number().optional(),
             strategyName: z.string().optional(),
             config: z.any().optional(),
+            status: z.string().optional(),
+            error: z.string().optional(),
+            logTail: z.string().optional(),
           }).optional(),
           backtestResults: z.object({
             profit_total: z.number(),

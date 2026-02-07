@@ -8,18 +8,20 @@ import { Loader2, CheckCircle2, AlertCircle, FileCode2, Diff, Play, Save, X, Shi
 import { cn } from "@/lib/utils";
 import { DiffEditor } from "@monaco-editor/react";
 
+type StrategyEdit = any;
+
 export interface ValidationResult {
+  validationId?: string;
   valid: boolean;
   errors: string[];
   warnings: string[];
-  code: string;
-  diff: string;
   changes: {
     type: "add_filter" | "add_indicator" | "add_helper" | "modify_entry" | "modify_exit" | "risk_management";
     description: string;
     targetLine?: number;
     snippet: string;
   }[];
+  edits?: StrategyEdit[];
 }
 
 interface StrategyValidationDialogProps {
@@ -28,8 +30,10 @@ interface StrategyValidationDialogProps {
   originalCode: string;
   strategyName: string;
   onValidate: () => Promise<ValidationResult>;
-  onApply: (code: string) => Promise<void>;
-  onSave: (code: string) => Promise<void>;
+  onPreviewEdits: (payload: { strategyPath: string; edits: StrategyEdit[] }) => Promise<{ diff?: string; content?: string }>;
+  onApplyToEditor: (code: string) => Promise<void>;
+  onApplyEditsAndSave: (payload: { strategyPath: string; edits: StrategyEdit[] }) => Promise<void>;
+  onMarkValidation?: (payload: { validationId: string; applied?: boolean; saved?: boolean }) => Promise<void>;
 }
 
 export function StrategyValidationDialog({
@@ -38,15 +42,19 @@ export function StrategyValidationDialog({
   originalCode,
   strategyName,
   onValidate,
-  onApply,
-  onSave,
+  onPreviewEdits,
+  onApplyToEditor,
+  onApplyEditsAndSave,
+  onMarkValidation,
 }: StrategyValidationDialogProps) {
   const [validating, setValidating] = useState(false);
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [activeTab, setActiveTab] = useState("preview");
   const [applied, setApplied] = useState(false);
   const [mounted, setMounted] = useState(false);
-  const [editorKey, setEditorKey] = useState(0);
+  const [preview, setPreview] = useState<{ diff: string; content: string } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const instanceIdRef = useRef<string>(Math.random().toString(36).slice(2));
 
   useEffect(() => {
     if (open) {
@@ -54,15 +62,14 @@ export function StrategyValidationDialog({
       return () => clearTimeout(timer);
     } else {
       setMounted(false);
+      const timer = setTimeout(() => {
+        setResult(null);
+        setApplied(false);
+        setPreview(null);
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [open]);
-
-  // Reset editor key when dialog opens with new result
-  useEffect(() => {
-    if (result) {
-      setEditorKey(prev => prev + 1);
-    }
-  }, [result?.code]);
 
   useEffect(() => {
     if (open && !result && !validating) {
@@ -73,16 +80,27 @@ export function StrategyValidationDialog({
   const handleValidate = async () => {
     setValidating(true);
     setApplied(false);
+    setPreview(null);
     try {
       const validationResult = await onValidate();
       setResult(validationResult);
+      if (validationResult.valid && Array.isArray(validationResult.edits) && validationResult.edits.length > 0) {
+        setPreviewing(true);
+        try {
+          const r = await onPreviewEdits({ strategyPath: strategyName, edits: validationResult.edits });
+          setPreview({
+            diff: typeof r?.diff === "string" ? r.diff : "",
+            content: typeof r?.content === "string" ? r.content : originalCode,
+          });
+        } finally {
+          setPreviewing(false);
+        }
+      }
     } catch (error) {
       setResult({
         valid: false,
         errors: ["Validation failed: " + (error as Error).message],
         warnings: [],
-        code: originalCode,
-        diff: "",
         changes: [],
       });
     } finally {
@@ -91,29 +109,43 @@ export function StrategyValidationDialog({
   };
 
   const handleApply = async () => {
-    if (!result?.code) return;
-    if (!result.valid) return;
-    await onApply(result.code);
+    if (!result?.valid) return;
+    if (!preview?.content) return;
+    await onApplyToEditor(preview.content);
     setApplied(true);
+    if (onMarkValidation && typeof result.validationId === "string" && result.validationId) {
+      await onMarkValidation({ validationId: result.validationId, applied: true });
+    }
   };
 
   const handleSave = async () => {
-    if (!result?.code) return;
-    if (!result.valid) return;
+    if (!result?.valid) return;
     if (!applied) return;
-    await onSave(result.code);
+    const edits = Array.isArray(result.edits) ? result.edits : [];
+    if (edits.length === 0) return;
+    await onApplyEditsAndSave({ strategyPath: strategyName, edits });
+    if (onMarkValidation && typeof result.validationId === "string" && result.validationId) {
+      await onMarkValidation({ validationId: result.validationId, saved: true });
+    }
     onOpenChange(false);
     setResult(null);
   };
 
   const handleCancel = () => {
     onOpenChange(false);
-    setResult(null);
     setApplied(false);
   };
 
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      handleCancel();
+      return;
+    }
+    onOpenChange(true);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={handleCancel}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="max-w-5xl h-[80vh] flex flex-col bg-gradient-to-br from-[#0a0a0f] via-[#12121a] to-[#1a1a24] border-white/10 text-slate-100">
         <DialogHeader className="flex-shrink-0">
           <div className="flex items-center justify-between">
@@ -149,10 +181,10 @@ export function StrategyValidationDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {validating ? (
+        {validating || previewing ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3">
             <Loader2 className="w-8 h-8 animate-spin text-purple-400" />
-            <p className="text-sm text-slate-400">Validating strategy code...</p>
+            <p className="text-sm text-slate-400">{validating ? "Validating strategy code..." : "Building server preview..."}</p>
           </div>
         ) : result ? (
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
@@ -194,14 +226,13 @@ export function StrategyValidationDialog({
                     <div className="flex-1 min-h-0">
                       {mounted && result && (
                         <DiffEditor
-                          key={`original-${editorKey}`}
                           height="100%"
                           language="python"
                           theme="vs-dark"
                           original={originalCode}
                           modified={originalCode}
-                          originalModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/original-view.py`}
-                          modifiedModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/original-view.py`}
+                          originalModelPath={`inmemory://strategy-validation/${instanceIdRef.current}/${strategyName}/original-view/original.py`}
+                          modifiedModelPath={`inmemory://strategy-validation/${instanceIdRef.current}/${strategyName}/original-view/modified.py`}
                           options={{
                             readOnly: true,
                             renderSideBySide: false,
@@ -225,14 +256,13 @@ export function StrategyValidationDialog({
                     <div className="flex-1 min-h-0">
                       {mounted && result && (
                         <DiffEditor
-                          key={`improved-${editorKey}`}
                           height="100%"
                           language="python"
                           theme="vs-dark"
-                          original={result.code}
-                          modified={result.code}
-                          originalModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/improved-view.py`}
-                          modifiedModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/improved-view.py`}
+                          original={preview?.content ?? originalCode}
+                          modified={preview?.content ?? originalCode}
+                          originalModelPath={`inmemory://strategy-validation/${instanceIdRef.current}/${strategyName}/improved-view/original.py`}
+                          modifiedModelPath={`inmemory://strategy-validation/${instanceIdRef.current}/${strategyName}/improved-view/modified.py`}
                           options={{
                             readOnly: true,
                             renderSideBySide: false,
@@ -258,14 +288,13 @@ export function StrategyValidationDialog({
                   <div className="flex-1 min-h-0">
                     {mounted && result && (
                       <DiffEditor
-                        key={`diff-${editorKey}`}
                         height="100%"
                         language="python"
                         theme="vs-dark"
                         original={originalCode}
-                        modified={result.code}
-                        originalModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/diff-original.py`}
-                        modifiedModelPath={`inmemory://strategy-validation/${strategyName}/${editorKey}/diff-modified.py`}
+                        modified={preview?.content ?? originalCode}
+                        originalModelPath={`inmemory://strategy-validation/${instanceIdRef.current}/${strategyName}/diff/original.py`}
+                        modifiedModelPath={`inmemory://strategy-validation/${instanceIdRef.current}/${strategyName}/diff/modified.py`}
                         options={{
                           readOnly: true,
                           renderSideBySide: true,
@@ -294,7 +323,7 @@ export function StrategyValidationDialog({
                 </div>
                 <ScrollArea className="flex-1">
                   <div className="p-4 font-mono text-xs leading-relaxed">
-                    {result.diff.split('\n').map((line, i) => {
+                    {(preview?.diff ?? "").split('\n').map((line, i) => {
                       const isAdded = line.startsWith('+') && !line.startsWith('+++');
                       const isRemoved = line.startsWith('-') && !line.startsWith('---');
                       const isHeader = line.startsWith('@@') || line.startsWith('---') || line.startsWith('+++');

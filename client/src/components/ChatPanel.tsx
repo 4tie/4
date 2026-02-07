@@ -26,6 +26,9 @@ interface ChatContext {
     id?: number;
     strategyName?: string;
     config?: any;
+    status?: string;
+    error?: string;
+    logTail?: string;
   };
   backtestResults?: {
     profit_total: number;
@@ -1496,29 +1499,25 @@ export function ChatPanel({
       fileName: context.fileName,
       selectedCode: context.selectedCode,
       onWebSearch: () => {
-        setInput((prev) => prev + "[Web search enabled - AI can search the internet] ");
+        setInput((prev) => (prev ? `${prev}\n\n@web ` : "@web "));
+        textareaRef.current?.focus();
       },
-      onIncludeContext: async () => {
-        // Set loading state in input
-        setInput((prev) => prev + "[Loading context...] ");
-        
-        const backtestId = context.lastBacktest?.id;
-        let fullBacktestData = null;
-        
-        // Fetch full backtest data if available
-        if (backtestId && Number.isFinite(backtestId)) {
-          fullBacktestData = await fetchFullBacktestData(backtestId);
-        }
-        
-        // Populate session context
-        setSessionContext({
-          hasContext: true,
-          fileName: context.fileName,
-          fileContent: context.fileContent,
-          backtestData: fullBacktestData?.results || context.backtestResults,
-          backtestId: backtestId,
-          config: fullBacktestData?.config || context.lastBacktest?.config,
-        });
+      onIncludeContext: () => {
+        setAutoContext(true);
+        setInput((prev) => (prev ? `${prev}\n\n@context ` : "@context "));
+        textareaRef.current?.focus();
+        const backtestId = Number(context.lastBacktest?.id ?? NaN);
+        (async () => {
+          const fullBacktestData = Number.isFinite(backtestId) ? await fetchFullBacktestData(backtestId) : null;
+          setSessionContext({
+            hasContext: true,
+            fileName: context.fileName,
+            fileContent: context.fileContent,
+            backtestData: fullBacktestData?.results || context.backtestResults,
+            backtestId: Number.isFinite(backtestId) ? backtestId : undefined,
+            config: fullBacktestData?.config || context.lastBacktest?.config,
+          });
+        })().catch(() => undefined);
         
         // Remove loading indicator and add confirmation
         setInput((prev) => prev.replace("[Loading context...] ", "[Context loaded - AI has access to file and backtest data] "));
@@ -1527,6 +1526,21 @@ export function ChatPanel({
         if (context.selectedCode) {
           setInput((prev) => prev + `\n\nSelected Code:\n\`\`\`python\n${context.selectedCode}\n\`\`\``);
         }
+      },
+      onOptimizeParams: () => {
+        const prompt = [
+          "Optimize my strategy parameters for better risk-adjusted returns.",
+          "Prioritize lower drawdown and more stable performance over raw profit.",
+          "Use my latest backtest metrics and propose a config_patch (only allowed keys).",
+          "Also propose next_experiments and optionally an action to run a batch backtest.",
+        ].join("\n");
+
+        setAutoContext(true);
+        setInput((prev) => {
+          const base = prev && prev.trim().length ? `${prev.trim()}\n\n` : "";
+          return `${base}${prompt}`;
+        });
+        textareaRef.current?.focus();
       },
     }).filter((item) => item.label.toLowerCase().includes(mentionQuery));
   }, [context, mentionQuery]);

@@ -40,20 +40,43 @@ router.post("/strategies/validate", async (req, res) => {
     
     // Store validation in database
     const validationId = uuidv4();
-    await db.insert(aiStrategyValidations).values({
+    let persistWarning: string | null = null;
+    try {
+      await db.insert(aiStrategyValidations).values({
+        validationId,
+        strategyName,
+        originalCode: code,
+        modifiedCode: code,
+        changes: validationResult.changes,
+        errors: validationResult.errors,
+        warnings: validationResult.warnings,
+        valid: validationResult.valid,
+        applied: false,
+        saved: false,
+      });
+    } catch (e: any) {
+      const pgCode = String(e?.code || "");
+      if (pgCode === "42P01") {
+        persistWarning = "Validation history table is missing (ai_strategy_validations). Validation succeeded but was not persisted. Run migrations/db:push to create it.";
+        console.warn("[validation] ai_strategy_validations table missing; skipping persistence");
+      } else {
+        persistWarning = "Validation succeeded but saving validation history failed.";
+        console.warn("[validation] Failed to persist validation history:", e);
+      }
+    }
+
+    const warnings = persistWarning
+      ? (Array.isArray(validationResult.warnings) ? [...validationResult.warnings, persistWarning] : [persistWarning])
+      : validationResult.warnings;
+
+    res.json({
       validationId,
-      strategyName,
-      originalCode: code,
-      modifiedCode: validationResult.code,
-      changes: validationResult.changes,
-      errors: validationResult.errors,
-      warnings: validationResult.warnings,
       valid: validationResult.valid,
-      applied: false,
-      saved: false,
+      errors: validationResult.errors,
+      warnings,
+      changes: validationResult.changes,
+      edits: validationResult.edits,
     });
-    
-    res.json(validationResult);
   } catch (error) {
     console.error("Validation error:", error);
     res.status(500).json({ 
@@ -160,6 +183,7 @@ async function validateStrategyCode(
   const errors: string[] = [];
   const warnings: string[] = [];
   const changes: any[] = [];
+  const edits: any[] = [];
 
   // Hard validation: ensure Python code is syntactically valid
   const compileErr = await pythonCompileCheck(strategyName, code);
@@ -170,13 +194,21 @@ async function validateStrategyCode(
   // Check for required methods
   if (!code.includes("def populate_indicators") && !code.includes("def populate_buy_trend")) {
     errors.push("Missing required method: populate_indicators or populate_buy_trend");
+    const snippet = `def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # TODO: Add your indicators here
+        return dataframe`;
+
     changes.push({
       type: "add_helper",
       description: "Add populate_indicators method",
-      snippet: `def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # TODO: Add your indicators here
-        return dataframe`,
+      snippet,
     });
+
+    edits.push({
+      kind: "insert",
+      anchor: { kind: "heuristic_indicators" },
+      content: `\n\n${snippet}\n`,
+    } as any);
   }
   
   // Check for entry signals
@@ -248,28 +280,12 @@ async function validateStrategyCode(
     }
   }
   
-  // Build diff showing changes
-  const diffLines: string[] = [];
-  
-  // Simple diff generation (in real implementation, use a proper diff library)
-  if (changes.length > 0) {
-    diffLines.push("--- Original");
-    diffLines.push("+++ Modified");
-    diffLines.push("@@ Changes @@");
-    
-    for (const change of changes) {
-      diffLines.push(`+ [${change.type}] ${change.description}`);
-      diffLines.push(`+ ${change.snippet.split("\n").join("\n+ ")}`);
-    }
-  }
-  
   return {
     valid: errors.length === 0,
     errors,
     warnings,
-    code: modifiedCode,
-    diff: diffLines.join("\n"),
     changes,
+    edits,
   };
 }
 
