@@ -341,7 +341,10 @@ function suiteAggregates(suite: Array<{ bt: any; timerange?: string }>): {
   };
 }
 
-async function callOpenRouterChat(input: { model: string; system: string; user: string; maxTokens?: number }, retries = 2): Promise<string | null> {
+async function callOpenRouterChat(
+  input: { model: string; system: string; user: string; maxTokens?: number; strictModel?: boolean },
+  retries = 2,
+): Promise<string | null> {
   const apiKey = getOpenRouterApiKey();
   const baseUrl = getOpenRouterBaseUrl();
   if (!apiKey) {
@@ -349,14 +352,16 @@ async function callOpenRouterChat(input: { model: string; system: string; user: 
   }
 
   // Fallback models in order of preference
-  const fallbackModels = [
-    input.model,
-    "google/gemini-2.0-flash-exp:free",
-    "google/gemini-2.0-pro-exp-02-05:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "deepseek/deepseek-chat:free",
-  ];
+  const fallbackModels = input.strictModel
+    ? [input.model]
+    : [
+        input.model,
+        "google/gemini-2.0-flash-exp:free",
+        "google/gemini-2.0-pro-exp-02-05:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "deepseek/deepseek-chat:free",
+      ];
 
   let lastError: Error | null = null;
 
@@ -398,7 +403,9 @@ async function callOpenRouterChat(input: { model: string; system: string; user: 
 
       if (!upstreamRes.ok) {
         const body = await upstreamRes.text().catch(() => "");
-        lastError = new Error(`OpenRouter request failed (${upstreamRes.status}): ${body || upstreamRes.statusText}`);
+        lastError = new Error(
+          `OpenRouter request failed for model '${model}' (${upstreamRes.status}): ${body || upstreamRes.statusText}`,
+        );
         if (attempt < retries) {
           await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
           continue;

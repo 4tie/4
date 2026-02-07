@@ -69,7 +69,7 @@ export function CenterPanel({
 }: CenterPanelProps) {
   const editorRef = useRef<CodeEditorHandle>(null);
   const [diffMounted, setDiffMounted] = useState(false);
-  const diffEditorRef = useRef<number>(0);
+  const diffEditorRef = useRef<string>(Math.random().toString(36).slice(2));
   const [diffEditorKey, setDiffEditorKey] = useState(0);
 
   useEffect(() => {
