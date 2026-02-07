@@ -8,6 +8,8 @@ import { useBacktests } from "@/hooks/use-backtests";
 import { useAIStore, useAIModels, useTestAIModel } from "@/hooks/use-ai";
 import { useTheme } from "@/components/ThemeProvider";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { reportErrorOnce } from "@/lib/reportError";
+import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
   DialogContent,
@@ -23,7 +25,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { insertFileSchema } from "@shared/schema";
-import { useToast } from "@/hooks/use-toast";
 
 type SidebarTab = "explorer" | "backtests";
 
@@ -409,9 +410,15 @@ function BacktestsPanel({
       return res.json() as Promise<{ success: boolean; strategyPath: string }>;
     },
     onSuccess: async (data) => {
-      await queryClient.invalidateQueries({ queryKey: ["/api/files"] }).catch(() => {});
-      await queryClient.invalidateQueries({ queryKey: ["config"] }).catch(() => {});
-      await queryClient.invalidateQueries({ queryKey: ["/api/backtests"] }).catch(() => {});
+      await queryClient.invalidateQueries({ queryKey: ["/api/files"] }).catch((e) => {
+        reportErrorOnce("sidebar:invalidate:files", "Failed to refresh files after rollback", e, { showToast: false });
+      });
+      await queryClient.invalidateQueries({ queryKey: ["config"] }).catch((e) => {
+        reportErrorOnce("sidebar:invalidate:config", "Failed to refresh config after rollback", e, { showToast: false });
+      });
+      await queryClient.invalidateQueries({ queryKey: ["/api/backtests"] }).catch((e) => {
+        reportErrorOnce("sidebar:invalidate:backtests", "Failed to refresh backtests after rollback", e, { showToast: false });
+      });
 
       const strategyPath = typeof (data as any)?.strategyPath === "string" ? (data as any).strategyPath : "";
       const id = Array.isArray(files) ? files.find((f: any) => f?.path === strategyPath)?.id : undefined;

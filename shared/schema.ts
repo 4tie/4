@@ -138,6 +138,25 @@ export const aiActions = pgTable("ai_actions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// AI Strategy Validation Changes
+export const aiStrategyValidations = pgTable("ai_strategy_validations", {
+  id: serial("id").primaryKey(),
+  validationId: text("validation_id").notNull().unique(),
+  strategyName: text("strategy_name").notNull(),
+  originalCode: text("original_code").notNull(),
+  modifiedCode: text("modified_code").notNull(),
+  changes: jsonb("changes").notNull(),
+  errors: text("errors").array(),
+  warnings: text("warnings").array(),
+  valid: boolean("valid").notNull(),
+  applied: boolean("applied").default(false),
+  saved: boolean("saved").default(false),
+  sessionId: integer("session_id").references(() => aiChatSessions.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  appliedAt: timestamp("applied_at"),
+  savedAt: timestamp("saved_at"),
+});
+
 export const agentHandoffs = pgTable("agent_handoffs", {
   id: serial("id").primaryKey(),
   runId: text("run_id").notNull(),
@@ -213,6 +232,10 @@ export type InsertAiAuditEvent = z.infer<typeof insertAiAuditEventSchema>;
 export const insertAiActionSchema = createInsertSchema(aiActions).omit({ id: true, createdAt: true });
 export type AiAction = typeof aiActions.$inferSelect;
 export type InsertAiAction = z.infer<typeof insertAiActionSchema>;
+
+export const insertAiStrategyValidationSchema = createInsertSchema(aiStrategyValidations).omit({ id: true, createdAt: true, appliedAt: true, savedAt: true });
+export type AiStrategyValidation = typeof aiStrategyValidations.$inferSelect;
+export type InsertAiStrategyValidation = z.infer<typeof insertAiStrategyValidationSchema>;
 
 export const insertAgentHandoffSchema = createInsertSchema(agentHandoffs).omit({ id: true, createdAt: true });
 export type AgentHandoff = typeof agentHandoffs.$inferSelect;

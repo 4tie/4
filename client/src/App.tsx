@@ -5,14 +5,13 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import NotFound from "@/pages/not-found";
-import Home from "@/pages/Home";
-import DarkWorkspace from "@/pages/DarkWorkspace";
+import Workspace from "@/pages/DarkWorkspace";
 
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Home} />
-      <Route path="/workspace" component={DarkWorkspace} />
+      <Route path="/" component={Workspace} />
+      <Route path="/workspace" component={Workspace} />
       <Route component={NotFound} />
     </Switch>
   );

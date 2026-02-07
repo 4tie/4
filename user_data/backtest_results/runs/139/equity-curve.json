@@ -1,0 +1,222 @@
+[
+  {
+    "idx": 0,
+    "pair": "ADA/USDT",
+    "close_date": "2025-12-09 21:45:00+00:00",
+    "profit_ratio": 0.12819709829596496,
+    "profit_abs": 1.2665527,
+    "equity_before": 50,
+    "equity_after": 51.2665527,
+    "peak": 51.2665527,
+    "drawdown": 0
+  },
+  {
+    "idx": 1,
+    "pair": "ETH/USDT",
+    "close_date": "2025-12-09 21:50:00+00:00",
+    "profit_ratio": 0.08383894132565975,
+    "profit_abs": 0.81334736,
+    "equity_before": 51.2665527,
+    "equity_after": 52.07990006,
+    "peak": 52.07990006,
+    "drawdown": 0
+  },
+  {
+    "idx": 2,
+    "pair": "ADA/USDT",
+    "close_date": "2025-12-31 16:40:00+00:00",
+    "profit_ratio": -0.2892919699803065,
+    "profit_abs": -2.98509921,
+    "equity_before": 52.07990006,
+    "equity_after": 49.09480085,
+    "peak": 52.07990006,
+    "drawdown": 0.05731768314764315
+  },
+  {
+    "idx": 3,
+    "pair": "ADA/USDT",
+    "close_date": "2026-01-02 18:50:00+00:00",
+    "profit_ratio": 0.12960665707918456,
+    "profit_abs": 1.16194652,
+    "equity_before": 49.09480085,
+    "equity_after": 50.25674737,
+    "peak": 52.07990006,
+    "drawdown": 0.035006839258516054
+  },
+  {
+    "idx": 4,
+    "pair": "XRP/USDT",
+    "close_date": "2026-01-05 18:00:00+00:00",
+    "profit_ratio": 0.0859140859140859,
+    "profit_abs": 0.83823168,
+    "equity_before": 50.25674737,
+    "equity_after": 51.09497905,
+    "peak": 52.07990006,
+    "drawdown": 0.018911730031457376
+  },
+  {
+    "idx": 5,
+    "pair": "ADA/USDT",
+    "close_date": "2026-01-06 07:20:00+00:00",
+    "profit_ratio": 0.07310936486194218,
+    "profit_abs": 0.72690688,
+    "equity_before": 51.09497905,
+    "equity_after": 51.82188593,
+    "peak": 52.07990006,
+    "drawdown": 0.00495419787101641
+  },
+  {
+    "idx": 6,
+    "pair": "BTC/USDT",
+    "close_date": "2026-01-08 12:05:00+00:00",
+    "profit_ratio": 0.003576502105134317,
+    "profit_abs": 0.03522564,
+    "equity_before": 51.82188593,
+    "equity_after": 51.85711157,
+    "peak": 52.07990006,
+    "drawdown": 0.00427782099703206
+  },
+  {
+    "idx": 7,
+    "pair": "SOL/USDT",
+    "close_date": "2026-01-08 14:25:00+00:00",
+    "profit_ratio": 0,
+    "profit_abs": 0,
+    "equity_before": 51.85711157,
+    "equity_after": 51.85711157,
+    "peak": 52.07990006,
+    "drawdown": 0.00427782099703206
+  },
+  {
+    "idx": 8,
+    "pair": "ETH/USDT",
+    "close_date": "2026-01-13 22:10:00+00:00",
+    "profit_ratio": 0,
+    "profit_abs": 0,
+    "equity_before": 51.85711157,
+    "equity_after": 51.85711157,
+    "peak": 52.07990006,
+    "drawdown": 0.00427782099703206
+  },
+  {
+    "idx": 9,
+    "pair": "SOL/USDT",
+    "close_date": "2026-01-14 06:05:00+00:00",
+    "profit_ratio": 0.07209316637881336,
+    "profit_abs": 0.73509554,
+    "equity_before": 51.85711157,
+    "equity_after": 52.592207110000004,
+    "peak": 52.592207110000004,
+    "drawdown": 0
+  },
+  {
+    "idx": 10,
+    "pair": "BTC/USDT",
+    "close_date": "2026-01-16 15:25:00+00:00",
+    "profit_ratio": 0.05167690723187056,
+    "profit_abs": 0.51184566,
+    "equity_before": 52.592207110000004,
+    "equity_after": 53.10405277,
+    "peak": 53.10405277,
+    "drawdown": 0
+  },
+  {
+    "idx": 11,
+    "pair": "XRP/USDT",
+    "close_date": "2026-01-31 08:35:00+00:00",
+    "profit_ratio": -0.2894192206784177,
+    "profit_abs": -2.8941024,
+    "equity_before": 53.10405277,
+    "equity_after": 50.20995037,
+    "peak": 53.10405277,
+    "drawdown": 0.05449871053222067
+  },
+  {
+    "idx": 12,
+    "pair": "ADA/USDT",
+    "close_date": "2026-01-31 14:25:00+00:00",
+    "profit_ratio": -0.2892013244926556,
+    "profit_abs": -2.97001647,
+    "equity_before": 50.20995037,
+    "equity_after": 47.239933900000004,
+    "peak": 53.10405277,
+    "drawdown": 0.11042695546040898
+  },
+  {
+    "idx": 13,
+    "pair": "ETH/USDT",
+    "close_date": "2026-01-31 17:10:00+00:00",
+    "profit_ratio": -0.28942257742257743,
+    "profit_abs": -2.89748214,
+    "equity_before": 47.239933900000004,
+    "equity_after": 44.34245176,
+    "peak": 53.10405277,
+    "drawdown": 0.16498930972269746
+  },
+  {
+    "idx": 14,
+    "pair": "SOL/USDT",
+    "close_date": "2026-01-31 17:10:00+00:00",
+    "profit_ratio": -0.2894225770886994,
+    "profit_abs": -2.98196795,
+    "equity_before": 44.34245176,
+    "equity_after": 41.360483810000005,
+    "peak": 53.10405277,
+    "drawdown": 0.2211426124266409
+  },
+  {
+    "idx": 15,
+    "pair": "BTC/USDT",
+    "close_date": "2026-02-02 09:00:00+00:00",
+    "profit_ratio": -0.19172235507447655,
+    "profit_abs": -2.00396885,
+    "equity_before": 41.360483810000005,
+    "equity_after": 39.356514960000005,
+    "peak": 53.10405277,
+    "drawdown": 0.2588792586046535
+  },
+  {
+    "idx": 16,
+    "pair": "ETH/USDT",
+    "close_date": "2026-02-02 09:05:00+00:00",
+    "profit_ratio": -0.04643793850727293,
+    "profit_abs": -0.37175471,
+    "equity_before": 39.356514960000005,
+    "equity_after": 38.98476025000001,
+    "peak": 53.10405277,
+    "drawdown": 0.2658797546234811
+  },
+  {
+    "idx": 17,
+    "pair": "ADA/USDT",
+    "close_date": "2026-02-02 09:05:00+00:00",
+    "profit_ratio": -0.024610830495172733,
+    "profit_abs": -0.18430291,
+    "equity_before": 38.98476025000001,
+    "equity_after": 38.80045734000001,
+    "peak": 53.10405277,
+    "drawdown": 0.269350354330781
+  },
+  {
+    "idx": 18,
+    "pair": "SOL/USDT",
+    "close_date": "2026-02-02 09:05:00+00:00",
+    "profit_ratio": -0.012263718813937155,
+    "profit_abs": -0.07843248,
+    "equity_before": 38.80045734000001,
+    "equity_after": 38.72202486000001,
+    "peak": 53.10405277,
+    "drawdown": 0.27082731279080097
+  },
+  {
+    "idx": 19,
+    "pair": "XRP/USDT",
+    "close_date": "2026-02-02 07:00:00+00:00",
+    "profit_ratio": -0.05886166813319131,
+    "profit_abs": -0.50365917,
+    "equity_before": 38.72202486000001,
+    "equity_after": 38.21836569000001,
+    "peak": 53.10405277,
+    "drawdown": 0.2803116956905658
+  }
+]

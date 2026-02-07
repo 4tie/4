@@ -17,33 +17,33 @@ import { format, parse } from "date-fns";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { reportErrorOnce } from "@/lib/reportError";
 
 import { usePreferences } from "@/hooks/use-preferences";
 import { useKeyboardShortcuts, getShortcutLabel, type Shortcut } from "@/hooks/use-keyboard-shortcuts";
 
 interface BacktestDashboardProps {
-  onLog: (message: string) => void;
+  onLog?: (message: string) => void;
   onBacktestCompleted?: (backtestId: number) => void;
   onStrategySelected?: (strategyName: string) => void;
   selectedStrategyName?: string | null;
+  variant?: "full" | "resultsOnly";
+  backtestId?: number | null;
 }
 
-const AVAILABLE_PAIRS = [
-  "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT",
-  "XRP/USDT", "DOT/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT",
-  "MATIC/USDT", "LTC/USDT", "TRX/USDT", "UNI/USDT", "ATOM/USDT",
-  "XLM/USDT", "ETC/USDT", "BCH/USDT", "NEAR/USDT", "FIL/USDT",
-  "APT/USDT", "ARB/USDT", "OP/USDT", "ICP/USDT", "ALGO/USDT",
-  "AAVE/USDT", "SAND/USDT", "MANA/USDT", "FTM/USDT", "EGLD/USDT",
-  "RUNE/USDT", "INJ/USDT", "GALA/USDT", "HBAR/USDT", "VET/USDT"
-];
-
-export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelected, selectedStrategyName }: BacktestDashboardProps) {
+export function BacktestDashboard({
+  onLog,
+  onBacktestCompleted,
+  onStrategySelected,
+  selectedStrategyName,
+  variant = "full",
+  backtestId = null,
+}: BacktestDashboardProps) {
   const { data: backtests } = useBacktests();
   const { data: files } = useFiles();
   const runBacktest = useRunBacktest();
   const runBacktestBatch = useRunBacktestBatch();
-  const [selectedBacktestId, setSelectedBacktestId] = useState<number | null>(null);
+  const [selectedBacktestId, setSelectedBacktestId] = useState<number | null>(() => (variant === "resultsOnly" ? backtestId : null));
   const [streamBacktestId, setStreamBacktestId] = useState<number | null>(null);
   const lastStreamedLogIndexRef = useRef(0);
   const completionNotifiedRef = useRef<number | null>(null);
@@ -53,6 +53,11 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
   const maxOpenTradesAutoRef = useRef<number | null>(null);
 
   const { data: streamBacktest } = useBacktest(streamBacktestId);
+
+  useEffect(() => {
+    if (variant !== "resultsOnly") return;
+    setSelectedBacktestId(backtestId ?? null);
+  }, [backtestId, variant]);
 
   // Filter strategy files from all files
   const strategyFiles = files?.filter(file => 
@@ -76,7 +81,8 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
     if (!raw) return null;
     try {
       return JSON.parse(raw);
-    } catch {
+    } catch (e) {
+      reportErrorOnce("backtestDashboard:formData:parse", "Failed to load saved backtest form", e, { showToast: true });
       return null;
     }
   });
@@ -96,7 +102,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
     const seen = new Set<string>();
     const merged: string[] = [];
 
-    for (const p of [...AVAILABLE_PAIRS, ...fromConfig]) {
+    for (const p of fromConfig) {
       if (seen.has(p)) continue;
       seen.add(p);
       merged.push(p);
@@ -135,6 +141,8 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
     }
   };
 
+  const log = useMemo(() => onLog ?? (() => {}), [onLog]);
+
   const [chartType, setChartType] = useState<'line' | 'area' | 'bar'>('area');
   const [showSMA, setShowSMA] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -168,7 +176,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
           timeframe: "5m",
           backtest_date_from: getDateDaysAgo(30),
           backtest_date_to: getTodayDate(),
-          stake_amount: 1000,
+          stake_amount: 0,
           max_open_trades: 1,
           tradable_balance_ratio: 1,
           include_stoploss: false,
@@ -178,7 +186,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
           trailing_stop_positive_offset: 0.02,
           trailing_only_offset_is_reached: false,
           minimal_roi: {},
-          pairs: ["BTC/USDT", "ETH/USDT"]
+          pairs: []
         }
       };
     }
@@ -195,8 +203,8 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
         backtest_date_to: (configData as any)?.backtest_date_to || getTodayDate(),
         stake_amount:
           (configData as any)?.stake_amount === "unlimited"
-            ? (typeof (configData as any)?.dry_run_wallet === "number" ? (configData as any).dry_run_wallet : 1000)
-            : parseFloat(String((configData as any)?.stake_amount ?? "")) || 1000,
+            ? (typeof (configData as any)?.dry_run_wallet === "number" ? (configData as any).dry_run_wallet : 0)
+            : parseFloat(String((configData as any)?.stake_amount ?? "")) || 0,
         max_open_trades: Number((configData as any)?.max_open_trades ?? 1),
         tradable_balance_ratio: Number((configData as any)?.tradable_balance_ratio ?? 1),
         include_stoploss: false,
@@ -206,7 +214,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
         trailing_stop_positive_offset: Number((configData as any)?.trailing_stop_positive_offset ?? 0.02),
         trailing_only_offset_is_reached: Boolean((configData as any)?.trailing_only_offset_is_reached ?? false),
         minimal_roi: ((configData as any)?.minimal_roi && typeof (configData as any)?.minimal_roi === "object") ? (configData as any).minimal_roi : {},
-        pairs: Array.isArray(configuredPairs) && configuredPairs.length > 0 ? configuredPairs : ["BTC/USDT", "ETH/USDT"]
+        pairs: Array.isArray(configuredPairs) && configuredPairs.length > 0 ? configuredPairs : []
       }
     };
   }, [configData]);
@@ -225,7 +233,8 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
       } else {
         setRoiText("{}");
       }
-    } catch {
+    } catch (e) {
+      reportErrorOnce("backtestDashboard:roi:json", "Failed to render ROI JSON", e, { showToast: false });
       setRoiText("{}");
     }
   }, [watchedMinimalRoi]);
@@ -331,7 +340,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
       action: () => {
         const data = form.getValues();
         localStorage.setItem('backtestFormData', JSON.stringify(data));
-        onLog(`✓ Preferences saved`);
+        log(`✓ Preferences saved`);
       }
     },
     {
@@ -345,7 +354,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
         const timeframes = tf ? [tf] : [];
 
         if (pairs.length === 0 || timeframes.length === 0) {
-          onLog("✗ Please select at least one pair and a timeframe before downloading data.");
+          log("✗ Please select at least one pair and a timeframe before downloading data.");
           return;
         }
 
@@ -373,9 +382,9 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
           ...timeframes,
         ];
         if (timerange) cmdParts.push("--timerange", timerange);
-        onLog(`> ${cmdParts.join(" ")}`);
+        log(`> ${cmdParts.join(" ")}`);
 
-        onLog(`Starting download-data for ${pairs.length} pairs (${timeframes.join(", ")})...`);
+        log(`Starting download-data for ${pairs.length} pairs (${timeframes.join(", ")})...`);
         downloadData.mutate({
           pairs,
           timeframes,
@@ -383,16 +392,16 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
           date_to: data?.config?.backtest_date_to,
         }, {
           onSuccess: (result: any) => {
-            if (result?.command) onLog(`> ${result.command}`);
-            if (result?.output) onLog(String(result.output));
+            if (result?.command) log(`> ${result.command}`);
+            if (result?.output) log(String(result.output));
             if (result?.success) {
-              onLog("✓ Data download completed.");
+              log("✓ Data download completed.");
             } else {
-              onLog(`✗ Data download failed (exit code ${result?.code ?? "?"}).`);
+              log(`✗ Data download failed (exit code ${result?.code ?? "?"}).`);
             }
           },
           onError: (error: any) => {
-            onLog(`✗ Failed to download data: ${error.message}`);
+            log(`✗ Failed to download data: ${error.message}`);
           }
         });
       }
@@ -474,6 +483,22 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
   useKeyboardShortcuts(shortcuts);
 
   const onSubmit = (data: any) => {
+    const pairs = Array.isArray(data?.config?.pairs) ? data.config.pairs.map((p: any) => String(p)).filter(Boolean) : [];
+    const tf = String(data?.config?.timeframe || "").trim();
+    const stake = Number((data as any)?.config?.stake_amount);
+    if (!tf) {
+      log("✗ Please select a timeframe before running a backtest.");
+      return;
+    }
+    if (!pairs.length) {
+      log("✗ Please select at least one pair before running a backtest.");
+      return;
+    }
+    if (!Number.isFinite(stake) || stake <= 0) {
+      log("✗ Please enter a positive stake amount before running a backtest.");
+      return;
+    }
+
     const toTimerangePart = (value: string) => {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
       return value.replace(/-/g, "");
@@ -502,11 +527,11 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
       config,
     };
 
-    onLog(`Starting backtest for strategy: ${data.strategyName}...`);
+    log(`Starting backtest for strategy: ${data.strategyName}...`);
 
     runBacktest.mutate(payload, {
       onSuccess: (result) => {
-        onLog(`Backtest started with ID: ${result.id}`);
+        log(`Backtest started with ID: ${result.id}`);
 
         setSelectedBacktestId(result.id);
         setStreamBacktestId(result.id);
@@ -523,12 +548,12 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
 
     if (status === "completed" && completionNotifiedRef.current !== streamBacktestId) {
       completionNotifiedRef.current = streamBacktestId;
-      onLog(`Backtest completed: ${streamBacktestId}`);
+      log(`Backtest completed: ${streamBacktestId}`);
       // Note: This callback is intentionally optional.
       // It allows the parent view to auto-navigate to results.
       onBacktestCompleted?.(streamBacktestId);
     }
-  }, [onLog, onBacktestCompleted, streamBacktest, streamBacktestId]);
+  }, [log, onBacktestCompleted, streamBacktest, streamBacktestId]);
 
   useEffect(() => {
     if (!streamBacktestId) return;
@@ -548,13 +573,13 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
         if (!part) continue;
         const trimmed = part.trimStart();
         if (trimmed.startsWith("$ ")) {
-          onLog(`> ${trimmed.slice(2)}`);
+          log(`> ${trimmed.slice(2)}`);
         } else {
-          onLog(part);
+          log(part);
         }
       }
     }
-  }, [onLog, streamBacktest, streamBacktestId]);
+  }, [log, streamBacktest, streamBacktestId]);
 
   const selectedBacktest = backtests?.find(b => b.id === selectedBacktestId);
 
@@ -950,8 +975,304 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
     };
   }, [selectedTrades, stakeAmount]);
 
+  const resultsSection = selectedBacktest ? (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 pb-12">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold tracking-tight">Results: {selectedBacktest.strategyName.split('/').pop()}</h2>
+
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="gap-2" data-testid="button-layout-settings">
+              <Settings2 className="h-4 w-4" />
+              Settings
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-96 p-3" align="end">
+            <div className="space-y-4">
+              <div>
+                <h4 className="font-medium text-sm border-b pb-2 mb-3">Widget Visibility & Order</h4>
+                <div className="space-y-2">
+                  {sortedWidgets.map((w) => (
+                    <div key={w.id} className="flex items-center justify-between gap-2 p-1.5 rounded-md hover:bg-secondary/40">
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={() => toggleWidget(w.id)}
+                          data-testid={`button-toggle-${w.id}`}
+                        >
+                          {w.visible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
+                        </Button>
+                        <span className="text-xs capitalize">{String(w.id)}</span>
+                      </div>
+                      <div className="flex gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={() => moveWidget(w.id, 'up')}
+                          disabled={w.order === 0}
+                          data-testid={`button-move-up-${w.id}`}
+                        >
+                          <TrendingUp className="h-3 w-3 rotate-[-45deg]" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={() => moveWidget(w.id, 'down')}
+                          disabled={w.order === widgetPrefs.length - 1}
+                          data-testid={`button-move-down-${w.id}`}
+                        >
+                          <TrendingDown className="h-3 w-3 rotate-[45deg]" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
+
+      <div className="flex flex-col gap-6">
+        {batchRuns.length > 1 && (
+          <Card className="border-border bg-card shadow-md" data-testid="batch-results">
+            <CardHeader>
+              <CardTitle className="text-base font-semibold">Batch Results</CardTitle>
+              <CardDescription className="text-xs">
+                Batch {String(selectedBatchId)} • {batchRuns.length} runs
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <div className="grid grid-cols-5 gap-2 text-[10px] text-muted-foreground px-2 py-2 border-b border-border/50">
+                <div>Range</div>
+                <div className="text-right">Profit</div>
+                <div className="text-right">Max DD</div>
+                <div className="text-right">Win Rate</div>
+                <div className="text-right">Trades</div>
+              </div>
+
+              <div className="divide-y divide-border/50">
+                {batchRuns.map((bt) => {
+                  const cfg = (bt as any)?.config || {};
+                  const res = (bt as any)?.results || {};
+                  const pt = typeof res?.profit_total === "number" ? res.profit_total : parseFloat(String(res?.profit_total ?? ""));
+                  const dd = typeof res?.max_drawdown === "number" ? res.max_drawdown : parseFloat(String(res?.max_drawdown ?? ""));
+                  const wr = typeof res?.win_rate === "number" ? res.win_rate : parseFloat(String(res?.win_rate ?? ""));
+                  const trades = typeof res?.total_trades === "number" ? res.total_trades : parseFloat(String(res?.total_trades ?? ""));
+                  const from = String(cfg?.timerange?.split("-")?.[0] || "");
+                  const to = String(cfg?.timerange?.split("-")?.[1] || "");
+                  const rangeLabel = (() => {
+                    const f = from ? `${from.slice(0, 4)}-${from.slice(4, 6)}-${from.slice(6, 8)}` : "";
+                    const t = to ? `${to.slice(0, 4)}-${to.slice(4, 6)}-${to.slice(6, 8)}` : "";
+                    return (f || t) ? `${f || "?"}→${t || "?"}` : "-";
+                  })();
+
+                  return (
+                    <button
+                      key={String((bt as any)?.id)}
+                      type="button"
+                      className={cn(
+                        "w-full grid grid-cols-5 gap-2 px-2 py-2 text-[11px] hover:bg-secondary/30 transition-colors text-left",
+                        (bt as any)?.id === selectedBatchId ? "bg-secondary/30" : ""
+                      )}
+                      onClick={() => setSelectedBacktestId((bt as any)?.id)}
+                    >
+                      <div className="truncate">{rangeLabel}</div>
+                      <div className={cn("text-right font-semibold", Number.isFinite(pt) && pt < 0 ? "text-red-500" : "text-green-500")}>
+                        {Number.isFinite(pt) ? `${(pt * 100).toFixed(2)}%` : "-"}
+                      </div>
+                      <div className="text-right">{Number.isFinite(dd) ? `${(dd * 100).toFixed(2)}%` : "-"}</div>
+                      <div className="text-right">{Number.isFinite(wr) ? `${(wr * 100).toFixed(0)}%` : "-"}</div>
+                      <div className="text-right">{Number.isFinite(trades) ? String(Math.round(trades)) : "-"}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Widgets + Advanced Metrics + Chart */}
+        {/* (kept as-is below in this component; moved into resultsSection for reuse) */}
+        {/* Widgets are rendered in full dashboard view */}
+
+        {advancedMetrics && (
+          <Card className="border-border bg-card shadow-md" data-testid="advanced-metrics">
+            <CardHeader>
+              <CardTitle className="text-base font-semibold">Advanced Metrics</CardTitle>
+              <CardDescription className="text-xs">Derived from trade list</CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs">
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Wins / Losses / BE</div>
+                  <div className="font-semibold">{advancedMetrics.winCount} / {advancedMetrics.lossCount} / {advancedMetrics.breakevenCount}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Profit Factor</div>
+                  <div className="font-semibold">{advancedMetrics.profitFactor?.toFixed(2) ?? "-"}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Profit Factor (Abs)</div>
+                  <div className="font-semibold">{advancedMetrics.profitFactorAbs?.toFixed(2) ?? "-"}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Expectancy / Trade</div>
+                  <div className="font-semibold">{advancedMetrics.expectancy != null ? (advancedMetrics.expectancy * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Expectancy (Abs)</div>
+                  <div className="font-semibold">{advancedMetrics.expectancyAbs?.toFixed(2) ?? "-"}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Avg Win</div>
+                  <div className="font-semibold">{advancedMetrics.avgWin != null ? (advancedMetrics.avgWin * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Avg Loss</div>
+                  <div className="font-semibold">{advancedMetrics.avgLoss != null ? (advancedMetrics.avgLoss * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Payoff Ratio (Abs)</div>
+                  <div className="font-semibold">{advancedMetrics.payoffRatio?.toFixed(2) ?? "-"}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Avg Duration</div>
+                  <div className="font-semibold">{advancedMetrics.avgDurationMin?.toFixed(1) ?? "-"}m</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Median Duration</div>
+                  <div className="font-semibold">{advancedMetrics.medianDurationMin?.toFixed(1) ?? "-"}m</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Best Trade</div>
+                  <div className="font-semibold">{advancedMetrics.bestTrade != null ? (advancedMetrics.bestTrade * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Worst Trade</div>
+                  <div className="font-semibold">{advancedMetrics.worstTrade != null ? (advancedMetrics.worstTrade * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Median Return</div>
+                  <div className="font-semibold">{advancedMetrics.medianReturn != null ? (advancedMetrics.medianReturn * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Return StdDev</div>
+                  <div className="font-semibold">{advancedMetrics.stdReturn != null ? (advancedMetrics.stdReturn * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Max Win Streak</div>
+                  <div className="font-semibold">{advancedMetrics.maxWinStreak}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Max Loss Streak</div>
+                  <div className="font-semibold">{advancedMetrics.maxLossStreak}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Trade-Series Max DD</div>
+                  <div className="font-semibold">{advancedMetrics.maxDrawdown != null ? (advancedMetrics.maxDrawdown * 100).toFixed(2) : "-"}%</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Trade-Series Max DD (Abs)</div>
+                  <div className="font-semibold">{advancedMetrics.maxDrawdownAbs?.toFixed(2) ?? "-"}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Avg MFE</div>
+                  <div className="font-semibold">{advancedMetrics.avgMfe != null ? (advancedMetrics.avgMfe * 100).toFixed(2) + "%" : "-"}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Avg MAE</div>
+                  <div className="font-semibold">{advancedMetrics.avgMae != null ? (advancedMetrics.avgMae * 100).toFixed(2) + "%" : "-"}</div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                <div className="border border-border rounded-md p-3 bg-background/40">
+                  <div className="text-[10px] text-muted-foreground mb-2">Top Pairs (Profit)</div>
+                  <div className="space-y-1">
+                    {advancedMetrics.topPairsByProfit.length === 0 ? (
+                      <div className="text-muted-foreground">-</div>
+                    ) : (
+                      advancedMetrics.topPairsByProfit.map((p) => (
+                        <div key={`top-profit-${p.pair}`} className="flex items-center justify-between gap-2">
+                          <div className="font-medium">{p.pair}</div>
+                          <div className="text-muted-foreground">{p.trades} trades</div>
+                          <div className="font-semibold">{p.profitAbs.toFixed(2)}</div>
+                          <div className="text-muted-foreground">{(p.winRate * 100).toFixed(0)}%</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+                <div className="border border-border rounded-md p-3 bg-background/40">
+                  <div className="text-[10px] text-muted-foreground mb-2">Bottom Pairs (Profit)</div>
+                  <div className="space-y-1">
+                    {advancedMetrics.bottomPairsByProfit.length === 0 ? (
+                      <div className="text-muted-foreground">-</div>
+                    ) : (
+                      advancedMetrics.bottomPairsByProfit.map((p) => (
+                        <div key={`bottom-profit-${p.pair}`} className="flex items-center justify-between gap-2">
+                          <div className="font-medium">{p.pair}</div>
+                          <div className="text-muted-foreground">{p.trades} trades</div>
+                          <div className="font-semibold">{p.profitAbs.toFixed(2)}</div>
+                          <div className="text-muted-foreground">{(p.winRate * 100).toFixed(0)}%</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+                <div className="border border-border rounded-md p-3 bg-background/40">
+                  <div className="text-[10px] text-muted-foreground mb-2">Best Pairs (Win Rate)</div>
+                  <div className="space-y-1">
+                    {advancedMetrics.bestPairsByWinRate.length === 0 ? (
+                      <div className="text-muted-foreground">-</div>
+                    ) : (
+                      advancedMetrics.bestPairsByWinRate.map((p) => (
+                        <div key={`best-winrate-${p.pair}`} className="flex items-center justify-between gap-2">
+                          <div className="font-medium">{p.pair}</div>
+                          <div className="text-muted-foreground">{p.trades} trades</div>
+                          <div className="font-semibold">{(p.winRate * 100).toFixed(0)}%</div>
+                          <div className="text-muted-foreground">{p.profitAbs.toFixed(2)}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+                <div className="border border-border rounded-md p-3 bg-background/40">
+                  <div className="text-[10px] text-muted-foreground mb-2">Worst Pairs (Win Rate)</div>
+                  <div className="space-y-1">
+                    {advancedMetrics.worstPairsByWinRate.length === 0 ? (
+                      <div className="text-muted-foreground">-</div>
+                    ) : (
+                      advancedMetrics.worstPairsByWinRate.map((p) => (
+                        <div key={`worst-winrate-${p.pair}`} className="flex items-center justify-between gap-2">
+                          <div className="font-medium">{p.pair}</div>
+                          <div className="text-muted-foreground">{p.trades} trades</div>
+                          <div className="font-semibold">{(p.winRate * 100).toFixed(0)}%</div>
+                          <div className="text-muted-foreground">{p.profitAbs.toFixed(2)}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    </div>
+  ) : null;
+
+  // `resultsOnly` is handled by conditionally hiding non-results sections below.
+
   return (
-    <div className="h-full overflow-y-auto bg-background p-6 space-y-8">
+    <div className={cn("h-full overflow-y-auto bg-background space-y-8", variant === "resultsOnly" ? "p-3" : "p-6")}>
+      {variant !== "resultsOnly" ? (
+        <>
       
       {/* Header with Settings and Alt Button */}
       <div className="flex items-center justify-between">
@@ -1221,12 +1542,12 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                         try {
                           const parsed = JSON.parse(roiText || "{}");
                           if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-                            onLog("✗ minimal_roi must be a JSON object");
+                            log("✗ minimal_roi must be a JSON object");
                             return;
                           }
                           form.setValue("config.minimal_roi" as any, parsed);
                         } catch (e: any) {
-                          onLog(`✗ Invalid minimal_roi JSON: ${e?.message || String(e)}`);
+                          log(`✗ Invalid minimal_roi JSON: ${e?.message || String(e)}`);
                         }
                       }}
                       className="min-h-[90px] font-mono text-xs"
@@ -1398,7 +1719,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                     onClick={() => {
                       const data = form.getValues();
                       localStorage.setItem('backtestFormData', JSON.stringify(data));
-                      onLog(`✓ Preferences saved`);
+                      log(`✓ Preferences saved`);
                     }}
                     title="Alt+S"
                   >
@@ -1436,7 +1757,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                   onClick={() => {
                     const data = form.getValues();
                     if (!data?.strategyName) {
-                      onLog("✗ Please select a strategy before running a batch validation.");
+                      log("✗ Please select a strategy before running a batch validation.");
                       return;
                     }
                     const ok = confirm("Run rolling validation (4 x 90-day windows ending at 'To Date')?");
@@ -1455,7 +1776,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                         end: end || undefined,
                       },
                     };
-                    onLog(`Starting rolling validation batch for: ${data.strategyName}`);
+                    log(`Starting rolling validation batch for: ${data.strategyName}`);
                     runBacktestBatch.mutate(payload as any);
                   }}
                 >
@@ -1479,7 +1800,7 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                       const timeframes = tf ? [tf] : [];
 
                       if (pairs.length === 0 || timeframes.length === 0) {
-                        onLog("✗ Please select at least one pair and a timeframe before downloading data.");
+                        log("✗ Please select at least one pair and a timeframe before downloading data.");
                         return;
                       }
 
@@ -1507,9 +1828,9 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                         ...timeframes,
                       ];
                       if (timerange) cmdParts.push("--timerange", timerange);
-                      onLog(`> ${cmdParts.join(" ")}`);
+                      log(`> ${cmdParts.join(" ")}`);
 
-                      onLog(`Starting download-data for ${pairs.length} pairs (${timeframes.join(", ")})...`);
+                      log(`Starting download-data for ${pairs.length} pairs (${timeframes.join(", ")})...`);
                       downloadData.mutate({
                         pairs,
                         timeframes,
@@ -1517,16 +1838,16 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
                         date_to: data?.config?.backtest_date_to,
                       }, {
                         onSuccess: (result: any) => {
-                          if (result?.command) onLog(`> ${result.command}`);
-                          if (result?.output) onLog(String(result.output));
+                          if (result?.command) log(`> ${result.command}`);
+                          if (result?.output) log(String(result.output));
                           if (result?.success) {
-                            onLog("✓ Data download completed.");
+                            log("✓ Data download completed.");
                           } else {
-                            onLog(`✗ Data download failed (exit code ${result?.code ?? "?"}).`);
+                            log(`✗ Data download failed (exit code ${result?.code ?? "?"}).`);
                           }
                         },
                         onError: (error: any) => {
-                          onLog(`✗ Failed to download data: ${error.message}`);
+                          log(`✗ Failed to download data: ${error.message}`);
                         }
                       });
                     }}
@@ -1613,6 +1934,9 @@ export function BacktestDashboard({ onLog, onBacktestCompleted, onStrategySelect
           </CardContent>
         </Card>
       </div>
+
+        </>
+      ) : null}
 
       {/* Results Section - Only if a backtest is selected */}
       {selectedBacktest && (
@@ -2191,4 +2515,3 @@ function StatsCard({ title, value, subValue, icon: Icon, trend, "data-testid": t
 
 // Stake Amount Input Component with Presets
 // Timerange Input Component with Date Picker
-

@@ -1,0 +1,134 @@
+[
+  {
+    "idx": 0,
+    "pair": "SAND/USDT",
+    "close_date": "2025-10-10 21:15:00+00:00",
+    "profit_ratio": -0.3443831983234157,
+    "profit_abs": -2.8416584,
+    "equity_before": 50,
+    "equity_after": 47.1583416,
+    "peak": 50,
+    "drawdown": 0.056833168
+  },
+  {
+    "idx": 1,
+    "pair": "UNI/USDT",
+    "close_date": "2025-10-10 21:15:00+00:00",
+    "profit_ratio": -0.34469192862085135,
+    "profit_abs": -2.84156289,
+    "equity_before": 47.1583416,
+    "equity_after": 44.31677871,
+    "peak": 50,
+    "drawdown": 0.11366442579999997
+  },
+  {
+    "idx": 2,
+    "pair": "XRP/USDT",
+    "close_date": "2025-10-10 21:15:00+00:00",
+    "profit_ratio": -0.3446488730729873,
+    "profit_abs": -2.81829348,
+    "equity_before": 44.31677871,
+    "equity_after": 41.49848523,
+    "peak": 50,
+    "drawdown": 0.1700302954
+  },
+  {
+    "idx": 3,
+    "pair": "FIL/USDT",
+    "close_date": "2025-10-10 21:15:00+00:00",
+    "profit_ratio": -0.3446291634236223,
+    "profit_abs": -2.837989,
+    "equity_before": 41.49848523,
+    "equity_after": 38.66049623,
+    "peak": 50,
+    "drawdown": 0.2267900754
+  },
+  {
+    "idx": 4,
+    "pair": "ARB/USDT",
+    "close_date": "2025-10-10 21:15:00+00:00",
+    "profit_ratio": -0.34461160835960614,
+    "profit_abs": -2.8428532,
+    "equity_before": 38.66049623,
+    "equity_after": 35.81764303,
+    "peak": 50,
+    "drawdown": 0.2836471394
+  },
+  {
+    "idx": 5,
+    "pair": "ARB/USDT",
+    "close_date": "2026-01-31 14:15:00+00:00",
+    "profit_ratio": -0.3446498930809981,
+    "profit_abs": -2.03316324,
+    "equity_before": 35.81764303,
+    "equity_after": 33.78447979,
+    "peak": 50,
+    "drawdown": 0.3243104042
+  },
+  {
+    "idx": 6,
+    "pair": "XRP/USDT",
+    "close_date": "2026-02-02 13:45:00+00:00",
+    "profit_ratio": -0.16030388302137458,
+    "profit_abs": -0.939582,
+    "equity_before": 33.78447979,
+    "equity_after": 32.84489779,
+    "peak": 50,
+    "drawdown": 0.34310204420000007
+  },
+  {
+    "idx": 7,
+    "pair": "UNI/USDT",
+    "close_date": "2026-02-01 10:45:00+00:00",
+    "profit_ratio": -0.07169220328365221,
+    "profit_abs": -0.4229764,
+    "equity_before": 32.84489779,
+    "equity_after": 32.421921389999994,
+    "peak": 50,
+    "drawdown": 0.3515615722000001
+  },
+  {
+    "idx": 8,
+    "pair": "FIL/USDT",
+    "close_date": "2026-02-01 10:45:00+00:00",
+    "profit_ratio": 0.3961481055272336,
+    "profit_abs": 2.3414352,
+    "equity_before": 32.421921389999994,
+    "equity_after": 34.763356589999994,
+    "peak": 50,
+    "drawdown": 0.3047328682000001
+  },
+  {
+    "idx": 9,
+    "pair": "SAND/USDT",
+    "close_date": "2026-02-01 10:45:00+00:00",
+    "profit_ratio": -0.2166800046522483,
+    "profit_abs": -1.2659175,
+    "equity_before": 34.763356589999994,
+    "equity_after": 33.49743908999999,
+    "peak": 50,
+    "drawdown": 0.33005121820000016
+  },
+  {
+    "idx": 10,
+    "pair": "DOGE/USDT",
+    "close_date": "2026-02-01 11:00:00+00:00",
+    "profit_ratio": -0.023367095737362217,
+    "profit_abs": -0.09506118,
+    "equity_before": 33.49743908999999,
+    "equity_after": 33.40237790999999,
+    "peak": 50,
+    "drawdown": 0.33195244180000016
+  },
+  {
+    "idx": 11,
+    "pair": "HBAR/USDT",
+    "close_date": "2026-02-01 11:00:00+00:00",
+    "profit_ratio": -0.2300908999070388,
+    "profit_abs": -1.3529055,
+    "equity_before": 33.40237790999999,
+    "equity_after": 32.04947240999999,
+    "peak": 50,
+    "drawdown": 0.35901055180000013
+  }
+]

@@ -1,0 +1,24 @@
+[
+  {
+    "idx": 0,
+    "pair": "DOGE/USDT",
+    "close_date": "2026-01-31 18:30:00+00:00",
+    "profit_ratio": -0.3446466944251882,
+    "profit_abs": -0.46257129,
+    "equity_before": 50,
+    "equity_after": 49.53742871,
+    "peak": 50,
+    "drawdown": 0.009251425799999992
+  },
+  {
+    "idx": 1,
+    "pair": "DOGE/USDT",
+    "close_date": "2026-02-01 11:00:00+00:00",
+    "profit_ratio": 0.0357053952492723,
+    "profit_abs": 0.04685837,
+    "equity_before": 49.53742871,
+    "equity_after": 49.58428708,
+    "peak": 50,
+    "drawdown": 0.008314258399999943
+  }
+]

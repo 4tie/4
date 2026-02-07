@@ -90,8 +90,9 @@ export function useRunBacktest() {
         credentials: "include",
       });
       if (!res.ok) {
-        const error = await res.json();
-        throw new Error(error.message || "Failed to run backtest");
+        const error = await res.json().catch(() => ({} as any));
+        const msg = error?.message || error?.error || `Server error: ${res.status} ${res.statusText}`;
+        throw new Error(msg);
       }
       return api.backtests.run.responses[201].parse(await res.json());
     },

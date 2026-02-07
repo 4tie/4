@@ -1,0 +1,79 @@
+[
+  {
+    "idx": 0,
+    "pair": "ATOM/USDT",
+    "close_date": "2025-11-03 21:15:00+00:00",
+    "profit_ratio": -0.10158326956604057,
+    "profit_abs": -0.71673382,
+    "equity_before": 50,
+    "equity_after": 49.28326618,
+    "peak": 50,
+    "drawdown": 0.014334676400000034
+  },
+  {
+    "idx": 1,
+    "pair": "XRP/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.03991101995850611,
+    "profit_abs": -0.27813958,
+    "equity_before": 49.28326618,
+    "equity_after": 49.0051266,
+    "peak": 50,
+    "drawdown": 0.01989746800000006
+  },
+  {
+    "idx": 2,
+    "pair": "DOT/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.06561565924115725,
+    "profit_abs": -0.46424576,
+    "equity_before": 49.0051266,
+    "equity_after": 48.54088084,
+    "peak": 50,
+    "drawdown": 0.029182383200000005
+  },
+  {
+    "idx": 3,
+    "pair": "TRX/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.03955538132753323,
+    "profit_abs": -0.27892376,
+    "equity_before": 48.54088084,
+    "equity_after": 48.26195708,
+    "peak": 50,
+    "drawdown": 0.03476085839999996
+  },
+  {
+    "idx": 4,
+    "pair": "OP/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.07467059782394951,
+    "profit_abs": -0.528287,
+    "equity_before": 48.26195708,
+    "equity_after": 47.73367008,
+    "peak": 50,
+    "drawdown": 0.04532659839999994
+  },
+  {
+    "idx": 5,
+    "pair": "ATOM/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": 0.0003962450983642507,
+    "profit_abs": 0.00275776,
+    "equity_before": 47.73367008,
+    "equity_after": 47.736427840000005,
+    "peak": 50,
+    "drawdown": 0.04527144319999991
+  },
+  {
+    "idx": 6,
+    "pair": "SAND/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.06176477110911803,
+    "profit_abs": -0.4311288,
+    "equity_before": 47.736427840000005,
+    "equity_after": 47.30529904,
+    "peak": 50,
+    "drawdown": 0.053894019199999976
+  }
+]

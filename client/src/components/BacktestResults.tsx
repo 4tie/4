@@ -63,6 +63,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAIStore } from "@/hooks/use-ai";
 import { DiagnosticReportView } from "./diagnostic/DiagnosticReportView";
 import type { DiagnosticReport } from "@shared/schema";
+import { reportErrorOnce } from "@/lib/reportError";
 
 interface BacktestResultsProps {
   backtestId: number;
@@ -125,7 +126,9 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
           description: `Diagnostics queued for backtest ${backtestId}`,
           backtestId,
         }),
-      }).catch(() => {});
+      }).catch((e) => {
+        reportErrorOnce("backtestResults:ai-actions", "Failed to persist AI action", e, { showToast: false });
+      });
     },
     onError: (error: any) => {
       toast({
@@ -152,14 +155,22 @@ export function BacktestResults({ backtestId, strategyName, stakeAmount, results
   const startBalance = (() => {
     const v = toNum((results as any)?.start_balance);
     if (Number.isFinite(v)) return v;
+
+    const end = toNum((results as any)?.end_balance);
+    const abs = toNum((results as any)?.profit_abs_total);
+    if (Number.isFinite(end) && Number.isFinite(abs)) return end - abs;
+
     const s = toNum(stakeAmount);
-    return Number.isFinite(s) && s > 0 ? s : 1000;
+    return Number.isFinite(s) && s > 0 ? s : 0;
   })();
 
   const profitTotal = toNum((results as any)?.profit_total);
   const profitAbsTotal = (() => {
     const v = toNum((results as any)?.profit_abs_total);
     if (Number.isFinite(v)) return v;
+    const end = toNum((results as any)?.end_balance);
+    const start = startBalance;
+    if (Number.isFinite(end) && Number.isFinite(start)) return end - start;
     return Number.isFinite(profitTotal) ? startBalance * profitTotal : 0;
   })();
 

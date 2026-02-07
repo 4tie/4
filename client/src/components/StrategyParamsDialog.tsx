@@ -76,17 +76,23 @@ export function StrategyParamsDialog({ open, onOpenChange, strategyPath }: Props
     setDrafts(next);
   }, [open, strategyPath, params.length]);
 
-  const computedChanges = useMemo(() => {
+  const computed = useMemo(() => {
     const changes: Array<{ name: string; before: string; after: string }> = [];
+    const errors: Record<string, string> = {};
     for (const p of params) {
       const nextRaw = drafts[p.name];
       if (nextRaw === undefined) continue;
-      if (String(nextRaw).trim() === "") continue;
+
+      const trimmed = String(nextRaw).trim();
+      if (trimmed === "") {
+        continue;
+      }
 
       let nextExpr: string;
       try {
         nextExpr = toPyLiteral(nextRaw);
-      } catch {
+      } catch (e: any) {
+        errors[p.name] = String(e?.message || "Invalid value");
         continue;
       }
 
@@ -95,10 +101,14 @@ export function StrategyParamsDialog({ open, onOpenChange, strategyPath }: Props
         changes.push({ name: p.name, before: p.before, after });
       }
     }
-    return changes;
+    return { changes, errors };
   }, [params, drafts]);
 
-  const canApply = Boolean(strategyPath) && computedChanges.length > 0 && !apply.isPending;
+  const computedChanges = computed.changes;
+  const draftErrors = computed.errors;
+
+  const hasErrors = Object.keys(draftErrors).length > 0;
+  const canApply = Boolean(strategyPath) && computedChanges.length > 0 && !hasErrors && !apply.isPending;
 
   return (
     <Dialog open={open} onOpenChange={(v) => onOpenChange(v)}>
@@ -166,6 +176,9 @@ export function StrategyParamsDialog({ open, onOpenChange, strategyPath }: Props
                           onChange={(e) => setDrafts((prev) => ({ ...prev, [p.name]: e.target.value }))}
                           placeholder="number | true/false | string"
                         />
+                        {draftErrors[p.name] ? (
+                          <div className="text-[10px] text-destructive">{draftErrors[p.name]}</div>
+                        ) : null}
                       </div>
 
                       <div className="space-y-1">

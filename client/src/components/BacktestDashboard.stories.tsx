@@ -6,15 +6,10 @@
 export const Primary = {
   // 👇 You can add your component props to here
   args: {
-    onLog: (...args: any[]) => 'Jinno is Awesome',
-    onBacktestCompleted: (...args: any[]) => 'Jinno is Awesome',
-    onStrategySelected: (...args: any[]) => 'Jinno is Awesome',
-    selectedStrategyName: "Jinno is Awesome",
-    title: "example",
-    value: "example",
-    subValue: "example",
-    icon: "Jinno is Awesome",
-    trend: "Jinno is Awesome",
+    onLog: () => undefined,
+    onBacktestCompleted: () => undefined,
+    onStrategySelected: () => undefined,
+    selectedStrategyName: "",
   },
 };
 

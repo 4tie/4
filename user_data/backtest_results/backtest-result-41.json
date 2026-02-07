@@ -1,0 +1,71 @@
+{
+  "total_trades": 4,
+  "win_rate": 0.25,
+  "profit_total": -0.2624308643308495,
+  "profit_abs_total": -13.121543216542477,
+  "max_drawdown": 0.2752716218060124,
+  "start_balance": 50,
+  "end_balance": 36.87845678345752,
+  "trades": [
+    {
+      "pair": "DOGE/USDT",
+      "profit_ratio": -0.10174244403557207,
+      "open_date": "2025-11-04 06:00:00+00:00",
+      "close_date": "2025-11-21 07:20:00+00:00",
+      "open_rate": 0.16109,
+      "close_rate": 0.14499,
+      "enter_tag": "",
+      "exit_reason": "stop_loss",
+      "stake_amount": 1.28872,
+      "amount": 8,
+      "equity_before": 50,
+      "equity_after": 44.912877798221395,
+      "profit_abs": -5.0871222017786035
+    },
+    {
+      "pair": "DOGE/USDT",
+      "profit_ratio": -0.1017839466632496,
+      "open_date": "2025-11-21 07:55:00+00:00",
+      "close_date": "2025-12-17 16:20:00+00:00",
+      "open_rate": 0.14002,
+      "close_rate": 0.12602,
+      "enter_tag": "",
+      "exit_reason": "stop_loss",
+      "stake_amount": 1.4002,
+      "amount": 10,
+      "equity_before": 44.912877798221395,
+      "equity_after": 40.34146783991418,
+      "profit_abs": -4.571409958307213
+    },
+    {
+      "pair": "DOGE/USDT",
+      "profit_ratio": -0.10175754998565588,
+      "open_date": "2025-12-18 17:40:00+00:00",
+      "close_date": "2026-01-31 08:40:00+00:00",
+      "open_rate": 0.12275,
+      "close_rate": 0.11048,
+      "enter_tag": "",
+      "exit_reason": "stop_loss",
+      "stake_amount": 1.35025,
+      "amount": 11,
+      "equity_before": 40.34146783991418,
+      "equity_after": 36.23641890969938,
+      "profit_abs": -4.105048930214797
+    },
+    {
+      "pair": "DOGE/USDT",
+      "profit_ratio": 0.017718027693577814,
+      "open_date": "2026-01-31 17:20:00+00:00",
+      "close_date": "2026-02-02 00:00:00+00:00",
+      "open_rate": 0.10225,
+      "close_rate": 0.10427000000000002,
+      "enter_tag": "",
+      "exit_reason": "force_exit",
+      "stake_amount": 1.32925,
+      "amount": 13,
+      "equity_before": 36.23641890969938,
+      "equity_after": 36.87845678345752,
+      "profit_abs": 0.6420378737581404
+    }
+  ]
+}

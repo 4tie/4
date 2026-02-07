@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { reportErrorOnce } from "@/lib/reportError";
 
 interface ConfigUpdatePayload {
   strategy?: string;
@@ -61,7 +62,9 @@ export function useUpdateConfig() {
       return response.json();
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["config"] }).catch(() => {});
+      await queryClient.invalidateQueries({ queryKey: ["config"] }).catch((e) => {
+        reportErrorOnce("config:invalidate", "Failed to refresh config", e, { showToast: false });
+      });
     },
   });
 }

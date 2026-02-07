@@ -1,9 +1,9 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, PanelRightClose, PanelRightOpen, Zap, BarChart3, Eye, Check, ChevronDown, RefreshCw } from "lucide-react";
+import { MessageSquare, X, Send, Loader2, Bot, User, Code, FileCode, Save, PanelRightClose, PanelRightOpen, Zap, BarChart3, Eye, Check, ChevronDown, RefreshCw, Database } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { api, buildUrl } from "@shared/routes";
 import { AIActionTimeline } from "@/components/ai/AIActionTimeline";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { reportErrorOnce } from "@/lib/reportError";
+import { MentionMenu, MentionItem, defaultMentionItems } from "@/components/MentionMenu";
 
 interface ChatContext {
   fileName?: string;
@@ -82,8 +84,8 @@ function createMessageId() {
         .slice(6, 8)
         .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
     }
-  } catch {
-    // ignore
+  } catch (e) {
+    console.error("createMessageId failed:", e);
   }
 
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
@@ -127,10 +129,10 @@ type ExtractedBlock = {
 };
 
 type ParsedAction =
-  | { action: "run_backtest"; payload: any }
-  | { action: "run_batch_backtest"; payload: any }
-  | { action: "run_diagnostic"; payload: any }
-  | { action: string; payload: any };
+  | { action: "run_backtest"; payload: any; label?: string }
+  | { action: "run_batch_backtest"; payload: any; label?: string }
+  | { action: "run_diagnostic"; payload: any; label?: string }
+  | { action: string; payload: any; label?: string };
 
 const parseActionBlock = (block: ExtractedBlock): ParsedAction | null => {
   const lang = String(block.lang || "").trim().toLowerCase();
@@ -142,8 +144,10 @@ const parseActionBlock = (block: ExtractedBlock): ParsedAction | null => {
     const action = typeof (parsed as any).action === "string" ? String((parsed as any).action) : "";
     if (!action) return null;
     const payload = (parsed as any).payload;
-    return { action: action as any, payload };
-  } catch {
+    const label = typeof (parsed as any).label === "string" ? String((parsed as any).label) : undefined;
+    return { action: action as any, payload, label };
+  } catch (e) {
+    reportErrorOnce("chat:parseActionBlock", "Failed to parse action block", e, { showToast: false });
     return null;
   }
 };
@@ -566,12 +570,13 @@ export function ChatPanel({
   const [hydrated, setHydrated] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
-  const [autoExplain, setAutoExplain] = useState<boolean>(() => {
+  const [autoContext, setAutoContext] = useState<boolean>(() => {
     try {
-      const raw = localStorage.getItem("chat:autoExplainRefinement");
+      const raw = localStorage.getItem("chat:autoContext");
       if (raw == null) return true;
       return raw === "true";
-    } catch {
+    } catch (e) {
+      reportErrorOnce("chat:autoContext:load", "Failed to load chat auto-context preference", e, { showToast: false });
       return true;
     }
   });
@@ -589,6 +594,33 @@ export function ChatPanel({
     error: string | null;
     isValidating: boolean;
   }>(null);
+  const [mentionMenuOpen, setMentionMenuOpen] = useState(false);
+  const [mentionPosition, setMentionPosition] = useState<{ top: number; left: number } | undefined>();
+  const [mentionQuery, setMentionQuery] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  
+  // Session context that persists across messages
+  const [sessionContext, setSessionContext] = useState<{
+    hasContext: boolean;
+    fileName?: string;
+    fileContent?: string;
+    backtestData?: any;
+    backtestId?: number;
+    config?: any;
+  }>({ hasContext: false });
+  
+  // Fetch full backtest details when context is requested
+  const fetchFullBacktestData = async (backtestId: number): Promise<any> => {
+    try {
+      const url = buildUrl(api.backtests.get.path, { id: backtestId });
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch backtest");
+      return res.json();
+    } catch (e) {
+      reportErrorOnce("chat:fetchBacktest", "Failed to fetch full backtest data", e, { showToast: false });
+      return null;
+    }
+  };
   const selectedModel = useResolvedAIModel();
   const setSelectedModel = useAIStore((s) => s.setSelectedModel);
   const modelsQuery = useAIModels();
@@ -655,8 +687,8 @@ export function ChatPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-    } catch {
-      // ignore persistence errors
+    } catch (e) {
+      reportErrorOnce("/api/chat/sessions/:sessionId/messages", "Failed to persist message", e, { showToast: false });
     }
   };
 
@@ -679,8 +711,8 @@ export function ChatPanel({
           ...payload,
         }),
       });
-    } catch {
-      // ignore action logging errors
+    } catch (e) {
+      reportErrorOnce("chat:ai-actions", "Failed to persist AI action", e, { showToast: false });
     }
   };
 
@@ -986,69 +1018,24 @@ export function ChatPanel({
           stopRefinementPolling();
 
           const final = refinementRef.current;
-          if (final && autoExplain && selectedModel) {
-            if (final.type === "single" && final.summaries.length === 1) {
-              const s = final.summaries[0];
-              const pPct = s.profitTotal == null ? "N/A" : `${(s.profitTotal * 100).toFixed(2)}%`;
-              const wrPct = s.winRate == null ? "N/A" : `${(s.winRate * 100).toFixed(1)}%`;
-              const ddPct = s.maxDrawdown == null ? "N/A" : `${(s.maxDrawdown * 100).toFixed(2)}%`;
-              const tr = s.totalTrades == null ? "N/A" : String(s.totalTrades);
-              const prompt = [
-                `We just finished a refinement backtest (ID ${s.id}) for strategy '${strategyName}'.`,
-                `Metrics: profit=${pPct}, win_rate=${wrPct}, max_drawdown=${ddPct}, trades=${tr}.`,
-                "Do NOT assume pairs/timeframe/fees/avg trade duration unless provided in context. If missing, ask.",
-                "Explain what these results mean, what is likely wrong/right in the strategy logic, and propose the next refinement step (top 3 experiments).",
-              ].join("\n");
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: createMessageId(),
-                  role: "user",
-                  content: prompt,
-                  timestamp: new Date(),
-                },
-              ]);
-              createAiAction({
-                actionType: "analysis",
-                description: `Auto-analysis requested for backtest ${s.id}`,
-                backtestId: s.id,
-                results: { summary: { profit: pPct, winRate: wrPct, drawdown: ddPct, trades: tr } },
-              });
-              chatMutation.mutate(prompt);
-            }
-
-            if (final.type === "batch" && final.summaries.length) {
-              const lines = final.summaries
-                .slice()
-                .sort((a, b) => a.id - b.id)
-                .map((s) => {
-                  const pPct = s.profitTotal == null ? "N/A" : `${(s.profitTotal * 100).toFixed(2)}%`;
-                  const wrPct = s.winRate == null ? "N/A" : `${(s.winRate * 100).toFixed(1)}%`;
-                  const ddPct = s.maxDrawdown == null ? "N/A" : `${(s.maxDrawdown * 100).toFixed(2)}%`;
-                  const tr = s.totalTrades == null ? "N/A" : String(s.totalTrades);
-                  return `- ${s.id}: profit=${pPct}, win_rate=${wrPct}, drawdown=${ddPct}, trades=${tr}`;
-                });
-              const prompt = [
-                `We just finished a refinement batch for strategy '${strategyName}'.`,
-                "Summaries:",
-                ...lines,
-                "Compare the runs, describe stability/robustness, and propose the next refinement step.",
-              ].join("\n");
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: createMessageId(),
-                  role: "user",
-                  content: prompt,
-                  timestamp: new Date(),
-                },
-              ]);
-              createAiAction({
-                actionType: "analysis",
-                description: "Auto-analysis requested for batch backtests",
-                results: { summaries: lines },
-              });
-              chatMutation.mutate(prompt);
+          if (final && autoContext) {
+            // Auto-load context when backtest completes and autoContext is enabled
+            const backtestId = final.summaries[0]?.id || context.lastBacktest?.id;
+            if (backtestId && Number.isFinite(backtestId)) {
+              (async () => {
+                const fullBacktestData = await fetchFullBacktestData(backtestId);
+                if (fullBacktestData) {
+                  setSessionContext({
+                    hasContext: true,
+                    fileName: context.fileName,
+                    fileContent: context.fileContent,
+                    backtestData: fullBacktestData.results,
+                    backtestId: backtestId,
+                    config: fullBacktestData.config,
+                  });
+                  pushMessage("assistant", "[Context auto-loaded: File and backtest data are now available for this session]");
+                }
+              })();
             }
           }
         }
@@ -1058,10 +1045,14 @@ export function ChatPanel({
     };
 
     refinementPollerRef.current = window.setInterval(() => {
-      pollOnce().catch(() => {});
+      pollOnce().catch((e) => {
+        reportErrorOnce("chat:refinementPoll", "Refinement polling failed", e, { showToast: false });
+      });
     }, 1500);
 
-    pollOnce().catch(() => {});
+    pollOnce().catch((e) => {
+      reportErrorOnce("chat:refinementPoll", "Refinement polling failed", e, { showToast: false });
+    });
   };
 
   const summarizeConfig = (cfg: any): string => {
@@ -1181,36 +1172,65 @@ export function ChatPanel({
         (typeof context.cursorFunctionName === "string" && context.cursorFunctionName.trim())
           ? context.cursorFunctionName.trim()
           : inferEnclosingPythonFunctionNameFromFile(context.fileContent, context.lineNumber) || undefined;
+      
+      // Build enhanced context with session data if available
+      const enhancedContext: any = {
+        fileName: context.fileName,
+        fileContent: typeof context.fileContent === "string" ? context.fileContent.slice(0, 22000) : context.fileContent,
+        selectedCode: typeof context.selectedCode === "string" ? context.selectedCode.slice(0, 6000) : context.selectedCode,
+        lineNumber: context.lineNumber,
+        cursorFunctionName: cursorFunctionNameForRequest,
+        lastBacktest: context.lastBacktest,
+        backtestResults: context.backtestResults,
+      };
+      
+      // Include full session context if @context was mentioned
+      if (sessionContext.hasContext) {
+        enhancedContext.sessionContext = {
+          fileName: sessionContext.fileName,
+          fileContent: sessionContext.fileContent?.slice(0, 30000), // Larger slice for full context
+          backtestData: sessionContext.backtestData,
+          backtestId: sessionContext.backtestId,
+          config: sessionContext.config,
+        };
+      }
+      
       const res = await apiRequest("POST", "/api/ai/chat", {
         message,
         model: selectedModel,
-        context: {
-          fileName: context.fileName,
-          fileContent: typeof context.fileContent === "string" ? context.fileContent.slice(0, 22000) : context.fileContent,
-          selectedCode: typeof context.selectedCode === "string" ? context.selectedCode.slice(0, 6000) : context.selectedCode,
-          lineNumber: context.lineNumber,
-          cursorFunctionName: cursorFunctionNameForRequest,
-          lastBacktest: context.lastBacktest,
-          backtestResults: context.backtestResults,
-        },
+        context: enhancedContext,
       });
       return res.json();
     },
-    onSuccess: (data: { response: string }) => {
+    onSuccess: (data: { response?: string } | null) => {
+      const content = typeof data?.response === "string" ? data.response.trim() : "";
+      if (!content) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: createMessageId(),
+            role: "assistant",
+            content: "Error: AI returned an empty response.",
+            timestamp: new Date(),
+          },
+        ]);
+        return;
+      }
+
       setMessages((prev) => [
         ...prev,
         {
           id: createMessageId(),
           role: "assistant",
-          content: data.response,
+          content,
           timestamp: new Date(),
         },
       ]);
       persistMessage({
         role: "assistant",
-        content: data.response,
+        content,
         model: selectedModel,
-        response: { content: data.response },
+        response: { content },
       });
       // Optional: Auto-scroll is handled by useEffect
     },
@@ -1233,7 +1253,9 @@ export function ChatPanel({
       return res.json();
     },
     onSuccess: (data: any) => {
-      queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] }).catch(() => {});
+      queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] }).catch((e) => {
+        reportErrorOnce("chat:backtests:invalidate", "Failed to refresh backtests list", e, { showToast: true });
+      });
     },
     onError: (error: any) => {
       setMessages((prev) => [
@@ -1285,11 +1307,16 @@ export function ChatPanel({
             : [];
           setMessages(mapped);
         }
+      } catch (e) {
+        reportErrorOnce("chat:session:load", "Failed to load chat session", e, { showToast: true });
       } finally {
         if (!cancelled) setHydrated(true);
       }
     };
-    loadSession().catch(() => setHydrated(true));
+    loadSession().catch((e) => {
+      reportErrorOnce("chat:session:load", "Failed to load chat session", e, { showToast: true });
+      setHydrated(true);
+    });
     return () => {
       cancelled = true;
     };
@@ -1301,7 +1328,9 @@ export function ChatPanel({
       return res.json();
     },
     onSuccess: (data: any) => {
-      queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] }).catch(() => {});
+      queryClient.invalidateQueries({ queryKey: [api.backtests.list.path] }).catch((e) => {
+        reportErrorOnce("chat:backtests:invalidate", "Failed to refresh backtests list", e, { showToast: true });
+      });
     },
     onError: (error: any) => {
       setMessages((prev) => [
@@ -1335,6 +1364,11 @@ export function ChatPanel({
   });
 
   useEffect(() => {
+    // Reset session context when file or backtest changes
+    setSessionContext({ hasContext: false });
+  }, [context.fileName, context.lastBacktest?.id]);
+
+  useEffect(() => {
     const handleAttach = (e: any) => {
       setInput(prev => prev + (prev ? "\n\n" : "") + e.detail);
     };
@@ -1358,10 +1392,11 @@ export function ChatPanel({
 
   useEffect(() => {
     try {
-      localStorage.setItem("chat:autoExplainRefinement", String(autoExplain));
-    } catch {
+      localStorage.setItem("chat:autoContext", String(autoContext));
+    } catch (e) {
+      reportErrorOnce("chat:autoContext:save", "Failed to save chat auto-context preference", e, { showToast: false });
     }
-  }, [autoExplain]);
+  }, [autoContext]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -1394,9 +1429,121 @@ export function ChatPanel({
     });
     chatMutation.mutate(input.trim());
     setInput("");
+    setMentionMenuOpen(false);
   };
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    const cursorPosition = e.target.selectionStart;
+    setInput(value);
+
+    // Detect @ mention
+    const textBeforeCursor = value.slice(0, cursorPosition);
+    const lastAtIndex = textBeforeCursor.lastIndexOf("@");
+
+    if (lastAtIndex === -1) {
+      setMentionMenuOpen(false);
+      return;
+    }
+
+    const textAfterAt = textBeforeCursor.slice(lastAtIndex + 1);
+    if (textAfterAt.includes(" ") || textAfterAt.includes("\n")) {
+      setMentionMenuOpen(false);
+      return;
+    }
+
+    setMentionQuery(textAfterAt.toLowerCase());
+    setMentionMenuOpen(true);
+
+    // Calculate position
+    if (textareaRef.current) {
+      const textarea = textareaRef.current;
+      const lineHeight = 20;
+      const lines = textBeforeCursor.slice(0, lastAtIndex).split("\n");
+      const currentLine = lines.length;
+      const charWidth = 8;
+      const currentCol = lines[lines.length - 1]?.length || 0;
+
+      setMentionPosition({
+        top: -280,
+        left: Math.min(currentCol * charWidth, 200),
+      });
+    }
+  };
+
+  const handleMentionSelect = (item: MentionItem) => {
+    const cursorPosition = textareaRef.current?.selectionStart || 0;
+    const textBeforeCursor = input.slice(0, cursorPosition);
+    const lastAtIndex = textBeforeCursor.lastIndexOf("@");
+
+    if (lastAtIndex !== -1) {
+      const beforeAt = input.slice(0, lastAtIndex);
+      const afterCursor = input.slice(cursorPosition);
+      const newText = beforeAt + `@${item.id} ` + afterCursor;
+      setInput(newText);
+
+      // Execute the item's action
+      item.action();
+    }
+
+    setMentionMenuOpen(false);
+    textareaRef.current?.focus();
+  };
+
+  const mentionItems = useMemo(() => {
+    return defaultMentionItems({
+      backtestResults: context.backtestResults,
+      fileName: context.fileName,
+      selectedCode: context.selectedCode,
+      onWebSearch: () => {
+        setInput((prev) => prev + "[Web search enabled - AI can search the internet] ");
+      },
+      onIncludeContext: async () => {
+        // Set loading state in input
+        setInput((prev) => prev + "[Loading context...] ");
+        
+        const backtestId = context.lastBacktest?.id;
+        let fullBacktestData = null;
+        
+        // Fetch full backtest data if available
+        if (backtestId && Number.isFinite(backtestId)) {
+          fullBacktestData = await fetchFullBacktestData(backtestId);
+        }
+        
+        // Populate session context
+        setSessionContext({
+          hasContext: true,
+          fileName: context.fileName,
+          fileContent: context.fileContent,
+          backtestData: fullBacktestData?.results || context.backtestResults,
+          backtestId: backtestId,
+          config: fullBacktestData?.config || context.lastBacktest?.config,
+        });
+        
+        // Remove loading indicator and add confirmation
+        setInput((prev) => prev.replace("[Loading context...] ", "[Context loaded - AI has access to file and backtest data] "));
+      },
+      onIncludeCode: () => {
+        if (context.selectedCode) {
+          setInput((prev) => prev + `\n\nSelected Code:\n\`\`\`python\n${context.selectedCode}\n\`\`\``);
+        }
+      },
+    }).filter((item) => item.label.toLowerCase().includes(mentionQuery));
+  }, [context, mentionQuery]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (mentionMenuOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionMenuOpen(false);
+        return;
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Enter") {
+        // Let MentionMenu handle these keys
+        return;
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -1485,7 +1632,11 @@ export function ChatPanel({
                         variant="ghost"
                         className="h-7 w-7 rounded-lg border border-border/40 bg-background/40"
                         title="Refresh list"
-                        onClick={() => modelsQuery.refetch().catch(() => {})}
+                        onClick={() =>
+                          modelsQuery.refetch().catch((e) => {
+                            reportErrorOnce("chat:models:refetch", "Failed to refresh AI models", e, { showToast: false });
+                          })
+                        }
                       >
                         <RefreshCw className={cn("w-3.5 h-3.5", modelsQuery.isFetching && "animate-spin")} />
                       </Button>
@@ -1561,28 +1712,14 @@ export function ChatPanel({
             </div>
             <div className="text-[10px] text-muted-foreground truncate">
               {sessionId ? `Session #${sessionId}` : "Ready"}
+              {sessionContext.hasContext && (
+                <span className="ml-2 inline-flex items-center gap-1 text-primary">
+                  <Database className="w-3 h-3" />
+                  Context loaded
+                </span>
+              )}
             </div>
           </div>
-        </div>
-
-        <div className="flex items-center gap-1">
-          <Button
-            data-testid="button-close-chat"
-            size="icon"
-            variant="ghost"
-            className={cn(
-              "h-8 w-8 rounded-lg",
-              "border border-border/40",
-              "bg-background/40 backdrop-blur",
-              "shadow-sm",
-              "hover:border-primary/30 hover:bg-primary/10 hover:text-primary hover:shadow-md",
-              "active:translate-y-px",
-            )}
-            onClick={onToggle}
-            title="Hide chat panel"
-          >
-            <PanelRightClose className="w-4 h-4" />
-          </Button>
         </div>
       </div>
 
@@ -1609,64 +1746,18 @@ export function ChatPanel({
             )}
 
             <div className="flex flex-wrap items-center gap-1.5">
-              {context.backtestResults && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 rounded-lg hover:bg-primary/10 hover:text-primary"
-                  title="Attach Backtest Results"
-                  onClick={() => {
-                    const results = context.backtestResults!;
-                    const resultText = `\n\nBacktest Results for context:\n- Profit Total: ${results.profit_total.toFixed(2)}%\n- Win Rate: ${results.win_rate.toFixed(2)}%\n- Max Drawdown: ${results.max_drawdown.toFixed(2)}%\n- Total Trades: ${results.total_trades}${results.sharpe ? `\n- Sharpe Ratio: ${results.sharpe.toFixed(2)}` : ""}`;
-                    setInput((prev) => prev + resultText);
-                  }}
-                >
-                  <BarChart3 className="w-3.5 h-3.5" />
-                </Button>
-              )}
-
               <Button
                 variant="ghost"
                 size="sm"
                 className={cn(
                   "h-7 px-2.5 text-[10px] rounded-lg",
-                  autoExplain ? "bg-primary/10 text-primary hover:bg-primary/15" : "hover:bg-primary/10 hover:text-primary",
+                  autoContext ? "bg-primary/10 text-primary hover:bg-primary/15" : "hover:bg-primary/10 hover:text-primary",
                 )}
-                title="When enabled, the chat will automatically ask the AI to interpret completed backtests."
-                onClick={() => setAutoExplain((v) => !v)}
+                title="When enabled, context (file + backtest data) is automatically loaded for all messages. When disabled, use @context to load manually."
+                onClick={() => setAutoContext((v) => !v)}
               >
-                <Zap className="w-3 h-3" />
-                Auto: {autoExplain ? "On" : "Off"}
-              </Button>
-
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  "h-7 w-7 rounded-lg",
-                  "border border-border/40",
-                  "bg-background/30 backdrop-blur",
-                  "shadow-sm",
-                  "hover:border-primary/30 hover:bg-primary/10 hover:text-primary hover:shadow-md",
-                )}
-                title="Ask AI to add a TA indicator pack (RSI/EMA/MACD/BB/ATR/ADX/Volume)"
-                onClick={() => {
-                  const text = [
-                    "Add a TA indicator pack to populate_indicators for this strategy:",
-                    "- RSI(14)",
-                    "- EMA(20), EMA(50)",
-                    "- MACD(12,26,9)",
-                    "- Bollinger Bands(20,2)",
-                    "- ATR(14)",
-                    "- ADX(14)",
-                    "- Volume SMA(20) and volume ratio",
-                    "Return the updated populate_indicators function only (keep function name).",
-                    "Do not change entry/exit rules unless asked.",
-                  ].join("\n");
-                  setInput((prev) => prev + (prev ? "\n\n" : "") + text);
-                }}
-              >
-                <Zap className="w-3.5 h-3.5" />
+                <Database className="w-3 h-3" />
+                Context: {autoContext ? "Auto" : "Manual"}
               </Button>
             </div>
           </div>
@@ -1733,33 +1824,6 @@ export function ChatPanel({
                   <pre className="truncate opacity-70 italic">"{context.selectedCode.substring(0, 100)}..."</pre>
                 </div>
               )}
-              <p className={cn(
-                "text-xs mt-2 max-w-[360px] mx-auto",
-                "text-muted-foreground leading-relaxed",
-              )}>
-                Context-locked: I’ll reference only the loaded strategy file + backtest metrics, and propose edits that map to your code exactly.
-              </p>
-              {context.backtestResults ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-9 text-[10px] gap-1.5 rounded-xl bg-background/60 backdrop-blur hover-elevate"
-                  onClick={() => {
-                    const r = context.backtestResults!;
-                    const prompt = [
-                      "Analyze this backtest (do NOT assume timeframe/pairs/fees unless present).",
-                      `Metrics: profit_total=${r.profit_total.toFixed(2)}%, win_rate=${r.win_rate.toFixed(2)}%, max_drawdown=${r.max_drawdown.toFixed(2)}%, total_trades=${r.total_trades}.`,
-                      "1) Summarize what looks good and the biggest risk.",
-                      "2) Propose the top 3 next experiments with expected impact.",
-                      "3) If you need more metrics (expectancy/profit factor/avg trade), ask for them explicitly.",
-                    ].join("\n");
-                    setInput((prev) => prev + (prev ? "\n\n" : "") + prompt);
-                  }}
-                >
-                  <Zap className="w-3.5 h-3.5 text-primary" />
-                  Explain Last Backtest
-                </Button>
-              ) : null}
             </div>
           )}
 
@@ -1834,7 +1898,7 @@ export function ChatPanel({
                       const patch = onApplyConfig ? parseConfigPatch(block) : null;
                       const action = parseActionBlock(block);
                       const hasConfigPatch = patch != null && Object.keys(patch).length > 0;
-                      const hasAction = Boolean(action);
+                      const hasAction = action != null;
                       const allowApplyToEditor =
                         Boolean(onApplyCode) &&
                         !hasConfigPatch &&
@@ -1974,15 +2038,13 @@ export function ChatPanel({
 
                       return (
                         <div key={idx} className="flex gap-2">
-                          {hasAction && (
+                          {action && (
                             <Button
                               size="sm"
                               variant="outline"
                               className={actionButtonClass}
                               disabled={runBacktestMutation.isPending || runBatchMutation.isPending || runDiagnosticMutation.isPending}
                               onClick={() => {
-                                if (!action) return;
-
                                 if (action.action === "run_backtest") {
                                   const baseCfg = (context.lastBacktest && context.lastBacktest.config) ? context.lastBacktest.config : {};
                                   const strategyName =
@@ -2066,7 +2128,7 @@ export function ChatPanel({
                               }}
                             >
                               <BarChart3 className="w-3.5 h-3.5" />
-                              Run
+                              {typeof action.label === "string" && action.label.trim() ? action.label.trim() : "Run"}
                             </Button>
                           )}
 
@@ -2260,20 +2322,30 @@ export function ChatPanel({
         </DialogContent>
       </Dialog>
 
-      <div className="p-3 border-t border-border/50 bg-background">
+      <div className="p-3 border-t border-border/50 bg-background relative">
         <div className="flex gap-2">
-          <Textarea
-            data-testid="textarea-chat-input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask about your strategy, backtests, or request code changes..."
-            className={cn(
-              "min-h-[60px] resize-none text-sm",
-              "rounded-2xl border-border/40 bg-background/60 backdrop-blur shadow-sm",
-              "focus-visible:ring-primary/30",
-            )}
-          />
+          <div className="relative flex-1">
+            <Textarea
+              ref={textareaRef}
+              data-testid="textarea-chat-input"
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder=""
+              className={cn(
+                "min-h-[60px] resize-none text-sm",
+                "rounded-2xl border-border/40 bg-background/60 backdrop-blur shadow-sm",
+                "focus-visible:ring-primary/30",
+              )}
+            />
+            <MentionMenu
+              isOpen={mentionMenuOpen && mentionItems.length > 0}
+              onClose={() => setMentionMenuOpen(false)}
+              items={mentionItems}
+              onSelect={handleMentionSelect}
+              position={mentionPosition}
+            />
+          </div>
           <Button
             data-testid="button-send-message"
             size="icon"

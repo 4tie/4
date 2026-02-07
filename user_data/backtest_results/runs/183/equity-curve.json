@@ -1,0 +1,101 @@
+[
+  {
+    "idx": 0,
+    "pair": "EGLD/USDT",
+    "close_date": "2026-01-31 17:10:00+00:00",
+    "profit_ratio": -0.25029705447040923,
+    "profit_abs": -2.4662378,
+    "equity_before": 50,
+    "equity_after": 47.5337622,
+    "peak": 50,
+    "drawdown": 0.04932475600000004
+  },
+  {
+    "idx": 1,
+    "pair": "ETH/USDT",
+    "close_date": "2026-01-31 17:10:00+00:00",
+    "profit_ratio": -0.2514985017784544,
+    "profit_abs": -2.47048997,
+    "equity_before": 47.5337622,
+    "equity_after": 45.063272229999995,
+    "peak": 50,
+    "drawdown": 0.09873455540000009
+  },
+  {
+    "idx": 2,
+    "pair": "AAVE/USDT",
+    "close_date": "2026-01-31 17:10:00+00:00",
+    "profit_ratio": -0.2514985012423408,
+    "profit_abs": -2.45449956,
+    "equity_before": 45.063272229999995,
+    "equity_after": 42.60877266999999,
+    "peak": 50,
+    "drawdown": 0.14782454660000013
+  },
+  {
+    "idx": 3,
+    "pair": "BCH/USDT",
+    "close_date": "2026-01-31 17:10:00+00:00",
+    "profit_ratio": -0.2514985009898711,
+    "profit_abs": -2.47231087,
+    "equity_before": 42.60877266999999,
+    "equity_after": 40.13646179999999,
+    "peak": 50,
+    "drawdown": 0.19727076400000015
+  },
+  {
+    "idx": 4,
+    "pair": "ETH/USDT",
+    "close_date": "2026-02-02 09:00:00+00:00",
+    "profit_ratio": -0.05558138144397465,
+    "profit_abs": -0.43641272,
+    "equity_before": 40.13646179999999,
+    "equity_after": 39.70004907999999,
+    "peak": 50,
+    "drawdown": 0.20599901840000015
+  },
+  {
+    "idx": 5,
+    "pair": "BNB/USDT",
+    "close_date": "2026-02-02 09:00:00+00:00",
+    "profit_ratio": -0.15908998510738337,
+    "profit_abs": -1.433385,
+    "equity_before": 39.70004907999999,
+    "equity_after": 38.26666407999999,
+    "peak": 50,
+    "drawdown": 0.23466671840000017
+  },
+  {
+    "idx": 6,
+    "pair": "BCH/USDT",
+    "close_date": "2026-02-02 08:55:00+00:00",
+    "profit_ratio": 0.04082256541272935,
+    "profit_abs": 0.3230496,
+    "equity_before": 38.26666407999999,
+    "equity_after": 38.58971367999999,
+    "peak": 50,
+    "drawdown": 0.22820572640000023
+  },
+  {
+    "idx": 7,
+    "pair": "AAVE/USDT",
+    "close_date": "2026-02-02 09:00:00+00:00",
+    "profit_ratio": -0.030079137202616003,
+    "profit_abs": -0.20975706,
+    "equity_before": 38.58971367999999,
+    "equity_after": 38.37995661999999,
+    "peak": 50,
+    "drawdown": 0.23240086760000025
+  },
+  {
+    "idx": 8,
+    "pair": "RUNE/USDT",
+    "close_date": "2026-02-02 08:55:00+00:00",
+    "profit_ratio": -0.031289465251729404,
+    "profit_abs": -0.248004,
+    "equity_before": 38.37995661999999,
+    "equity_after": 38.131952619999986,
+    "peak": 50,
+    "drawdown": 0.2373609476000003
+  }
+]

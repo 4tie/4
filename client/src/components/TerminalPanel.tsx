@@ -31,10 +31,15 @@ export function TerminalPanel({ logs, onCommand }: TerminalPanelProps) {
     if (onCommand) onCommand(`> ${cmd}`);
 
     try {
-      const res = await apiRequest("POST", "/api/cmd", { command: cmd });
-      const data = await res.json();
-      if (onCommand && data.output) {
-        onCommand(data.output);
+      if (cmd !== "freqtrade --version" && cmd !== "freqtrade -V") {
+        onCommand?.("Only `freqtrade --version` is supported here. Use the dedicated UI actions for backtests/download/diagnostics.");
+        return;
+      }
+
+      const res = await apiRequest("GET", "/api/freqtrade/version");
+      const data = await res.json().catch(() => null);
+      if (onCommand) {
+        onCommand((data?.output || "").trim() || (data?.ok ? "OK" : "Failed"));
       }
     } catch (error) {
       if (onCommand) onCommand("Error executing command.");
@@ -89,7 +94,7 @@ export function TerminalPanel({ logs, onCommand }: TerminalPanelProps) {
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             disabled={isExecuting}
-            placeholder="Type a command..."
+            placeholder="Try: freqtrade --version"
             className="flex-1 bg-background border border-border rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary transition-all"
           />
           <button

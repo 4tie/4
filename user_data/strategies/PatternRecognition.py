@@ -45,7 +45,7 @@ class PatternRecognition(IStrategy):
     }
 
     # ROI table:
-    minimal_roi = {
+    minimal_roi ={
         "0": 0.936,
         "5271": 0.332,
         "18147": 0.086,
@@ -56,7 +56,7 @@ class PatternRecognition(IStrategy):
     stoploss = -0.288
 
     # Trailing stop:
-    trailing_stop = True
+    trailing_stop =True
     trailing_stop_positive = 0.032
     trailing_stop_positive_offset = 0.084
     trailing_only_offset_is_reached = True

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.DS_Store
+server/public/
+.env
+.env.*
+*.tar.gz
+*.log
+__pycache__/
+*.pyc
+.venv/
+user_data/
+vite.config.ts.*
+

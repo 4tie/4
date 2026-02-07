@@ -1,0 +1,90 @@
+[
+  {
+    "idx": 0,
+    "pair": "ATOM/USDT",
+    "close_date": "2025-11-03 21:15:00+00:00",
+    "profit_ratio": -0.10158326956604057,
+    "profit_abs": -5.0791634783020285,
+    "equity_before": 50,
+    "equity_after": 44.92083652169797,
+    "peak": 50,
+    "drawdown": 0.10158326956604057
+  },
+  {
+    "idx": 1,
+    "pair": "XRP/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.039911019958506114,
+    "profit_abs": -1.7928364029702781,
+    "equity_before": 44.92083652169797,
+    "equity_after": 43.12800011872769,
+    "peak": 50,
+    "drawdown": 0.13743999762544618
+  },
+  {
+    "idx": 2,
+    "pair": "DOT/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.06561565924115725,
+    "profit_abs": -2.829872159543026,
+    "equity_before": 43.12800011872769,
+    "equity_after": 40.29812795918467,
+    "peak": 50,
+    "drawdown": 0.19403744081630664
+  },
+  {
+    "idx": 3,
+    "pair": "TRX/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.03955538132753322,
+    "profit_abs": -1.5940078182112778,
+    "equity_before": 40.29812795918467,
+    "equity_after": 38.704120140973394,
+    "peak": 50,
+    "drawdown": 0.22591759718053211
+  },
+  {
+    "idx": 4,
+    "pair": "OP/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.07467059818730812,
+    "profit_abs": -2.8900598032399234,
+    "equity_before": 38.704120140973394,
+    "equity_after": 35.81406033773347,
+    "peak": 50,
+    "drawdown": 0.28371879324533056
+  },
+  {
+    "idx": 5,
+    "pair": "ATOM/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": 0.0003962450983642507,
+    "profit_abs": 0.01419114586134841,
+    "equity_before": 35.81406033773347,
+    "equity_after": 35.828251483594826,
+    "peak": 50,
+    "drawdown": 0.2834349703281035
+  },
+  {
+    "idx": 6,
+    "pair": "EGLD/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.04640298522389735,
+    "profit_abs": -1.6625378241913291,
+    "equity_before": 35.828251483594826,
+    "equity_after": 34.165713659403494,
+    "peak": 50,
+    "drawdown": 0.31668572681193013
+  },
+  {
+    "idx": 7,
+    "pair": "SAND/USDT",
+    "close_date": "2025-11-04 00:00:00+00:00",
+    "profit_ratio": -0.06176477110911805,
+    "profit_abs": -2.1102374839527247,
+    "equity_before": 34.165713659403494,
+    "equity_after": 32.05547617545077,
+    "peak": 50,
+    "drawdown": 0.3588904764909846
+  }
+]

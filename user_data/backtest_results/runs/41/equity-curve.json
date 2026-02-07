@@ -1,0 +1,46 @@
+[
+  {
+    "idx": 0,
+    "pair": "DOGE/USDT",
+    "close_date": "2025-11-21 07:20:00+00:00",
+    "profit_ratio": -0.10174244403557207,
+    "profit_abs": -5.0871222017786035,
+    "equity_before": 50,
+    "equity_after": 44.912877798221395,
+    "peak": 50,
+    "drawdown": 0.1017424440355721
+  },
+  {
+    "idx": 1,
+    "pair": "DOGE/USDT",
+    "close_date": "2025-12-17 16:20:00+00:00",
+    "profit_ratio": -0.1017839466632496,
+    "profit_abs": -4.571409958307213,
+    "equity_before": 44.912877798221395,
+    "equity_after": 40.34146783991418,
+    "peak": 50,
+    "drawdown": 0.1931706432017164
+  },
+  {
+    "idx": 2,
+    "pair": "DOGE/USDT",
+    "close_date": "2026-01-31 08:40:00+00:00",
+    "profit_ratio": -0.10175754998565588,
+    "profit_abs": -4.105048930214797,
+    "equity_before": 40.34146783991418,
+    "equity_after": 36.23641890969938,
+    "peak": 50,
+    "drawdown": 0.2752716218060124
+  },
+  {
+    "idx": 3,
+    "pair": "DOGE/USDT",
+    "close_date": "2026-02-02 00:00:00+00:00",
+    "profit_ratio": 0.017718027693577814,
+    "profit_abs": 0.6420378737581404,
+    "equity_before": 36.23641890969938,
+    "equity_after": 36.87845678345752,
+    "peak": 50,
+    "drawdown": 0.26243086433084956
+  }
+]

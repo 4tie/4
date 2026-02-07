@@ -313,7 +313,9 @@ export class DatabaseStorage implements IStorage {
       const [inserted] = await db.insert(diagnosticChangeTargets).values(targets).returning();
       return inserted ?? null;
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return null;
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("diagnostic_change_targets table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }
@@ -446,7 +448,9 @@ export class DatabaseStorage implements IStorage {
       const [run] = await db.select().from(aiRefinementRuns).where(eq(aiRefinementRuns.id, id));
       return run;
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return undefined;
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_refinement_runs table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }
@@ -455,7 +459,9 @@ export class DatabaseStorage implements IStorage {
     try {
       return await db.select().from(aiRefinementRuns).orderBy(desc(aiRefinementRuns.createdAt));
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return [];
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_refinement_runs table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }
@@ -497,7 +503,9 @@ export class DatabaseStorage implements IStorage {
         .where(eq(aiRefinementIterations.runId, runId))
         .orderBy(asc(aiRefinementIterations.createdAt));
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return [];
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_refinement_iterations table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }
@@ -597,7 +605,9 @@ export class DatabaseStorage implements IStorage {
       }
       return await db.select().from(aiActions).orderBy(desc(aiActions.createdAt));
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return [];
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_actions table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }
@@ -607,7 +617,9 @@ export class DatabaseStorage implements IStorage {
       const [action] = await db.select().from(aiActions).where(eq(aiActions.id, id));
       return action;
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return undefined;
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_actions table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }
@@ -616,7 +628,9 @@ export class DatabaseStorage implements IStorage {
     try {
       return await db.select().from(aiActions).where(eq(aiActions.backtestId, backtestId)).orderBy(desc(aiActions.createdAt));
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return [];
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("ai_actions table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }
@@ -631,7 +645,9 @@ export class DatabaseStorage implements IStorage {
       const [handoff] = await db.select().from(agentHandoffs).where(eq(agentHandoffs.runId, runId));
       return handoff;
     } catch (err: any) {
-      if (String(err?.code || "") === "42P01") return undefined;
+      if (String(err?.code || "") === "42P01") {
+        throw new Error("agent_handoffs table is missing. Apply migrations (db:push) and retry.");
+      }
       throw err;
     }
   }

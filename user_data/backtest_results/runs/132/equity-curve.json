@@ -1,0 +1,79 @@
+[
+  {
+    "idx": 0,
+    "pair": "EGLD/USDT",
+    "close_date": "2026-01-31 17:00:00+00:00",
+    "profit_ratio": -0.24985705084389292,
+    "profit_abs": -1.5358565,
+    "equity_before": 50,
+    "equity_after": 48.4641435,
+    "peak": 50,
+    "drawdown": 0.030717130000000026
+  },
+  {
+    "idx": 1,
+    "pair": "ETH/USDT",
+    "close_date": "2026-01-31 18:30:00+00:00",
+    "profit_ratio": -0.2514985014985015,
+    "profit_abs": -1.51735767,
+    "equity_before": 48.4641435,
+    "equity_after": 46.946785829999996,
+    "peak": 50,
+    "drawdown": 0.06106428340000008
+  },
+  {
+    "idx": 2,
+    "pair": "AAVE/USDT",
+    "close_date": "2026-01-31 18:30:00+00:00",
+    "profit_ratio": -0.2514985006781339,
+    "profit_abs": -1.53284029,
+    "equity_before": 46.946785829999996,
+    "equity_after": 45.41394553999999,
+    "peak": 50,
+    "drawdown": 0.09172108920000013
+  },
+  {
+    "idx": 3,
+    "pair": "ETH/USDT",
+    "close_date": "2026-02-01 11:00:00+00:00",
+    "profit_ratio": -0.017894562037508874,
+    "profit_abs": -0.09968343,
+    "equity_before": 45.41394553999999,
+    "equity_after": 45.314262109999994,
+    "peak": 50,
+    "drawdown": 0.09371475780000012
+  },
+  {
+    "idx": 4,
+    "pair": "BNB/USDT",
+    "close_date": "2026-02-01 11:00:00+00:00",
+    "profit_ratio": -0.11126450183708717,
+    "profit_abs": -0.67399045,
+    "equity_before": 45.314262109999994,
+    "equity_after": 44.640271659999996,
+    "peak": 50,
+    "drawdown": 0.10719456680000007
+  },
+  {
+    "idx": 5,
+    "pair": "BCH/USDT",
+    "close_date": "2026-02-01 11:00:00+00:00",
+    "profit_ratio": -0.10436153402644303,
+    "profit_abs": -0.614155,
+    "equity_before": 44.640271659999996,
+    "equity_after": 44.02611666,
+    "peak": 50,
+    "drawdown": 0.11947766680000001
+  },
+  {
+    "idx": 6,
+    "pair": "RUNE/USDT",
+    "close_date": "2026-02-01 11:00:00+00:00",
+    "profit_ratio": -0.17449217449217444,
+    "profit_abs": -1.0794924,
+    "equity_before": 44.02611666,
+    "equity_after": 42.94662426,
+    "peak": 50,
+    "drawdown": 0.1410675148
+  }
+]

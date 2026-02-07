@@ -24,6 +24,19 @@ export const errorSchemas = {
 };
 
 export const api = {
+  freqtrade: {
+    version: {
+      method: "GET" as const,
+      path: "/api/freqtrade/version",
+      responses: {
+        200: z.object({
+          ok: z.boolean(),
+          output: z.string(),
+          code: z.number().optional(),
+        }),
+      },
+    },
+  },
   files: {
     list: {
       method: 'GET' as const,
@@ -540,6 +553,30 @@ export const api = {
       path: '/api/backtests/:id/ai-actions',
       responses: {
         200: z.array(z.custom<typeof aiActions.$inferSelect>()),
+      },
+    },
+  },
+  data: {
+    download: {
+      method: 'POST' as const,
+      path: '/api/data/download',
+      input: z.object({
+        pairs: z.array(z.string()).min(1),
+        timeframes: z.array(z.string()).min(1),
+        date_from: z.string().optional(),
+        date_to: z.string().optional(),
+      }),
+      responses: {
+        200: z.object({
+          success: z.boolean(),
+          code: z.number().optional(),
+          command: z.string().optional(),
+          output: z.string().optional(),
+          exchange: z.string().optional(),
+          missing: z.array(z.object({ pair: z.string(), timeframe: z.string() })).optional(),
+        }),
+        400: errorSchemas.validation,
+        500: errorSchemas.internal,
       },
     },
   },

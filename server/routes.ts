@@ -6,6 +6,7 @@ import { z } from "zod";
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs/promises";
+import validationRouter from "./routes/validation";
 import { Phase1Structural } from "./utils/backtest-diagnostic/phase1-structural";
 import { Phase2Performance } from "./utils/backtest-diagnostic/phase2-performance";
 import { Phase3Drawdown } from "./utils/backtest-diagnostic/phase3-drawdown";
@@ -54,6 +55,14 @@ const refinementStopRequests = new Set<string>();
 
 let cachedBinance24hTickers: any[] | null = null;
 let cachedBinance24hTickersAt = 0;
+
+const logOnceKeys = new Set<string>();
+function logOnce(key: string, message: string, err: unknown) {
+  const k = String(key || "").trim();
+  if (k && logOnceKeys.has(k)) return;
+  if (k) logOnceKeys.add(k);
+  console.error(message, err);
+}
 
 async function enqueueDiagnosticJob(jobId: string) {
   diagnosticQueue.push(jobId);
@@ -145,14 +154,24 @@ function mergeConfigPatch(base: any, patch: any): any {
 
 async function readUserConfig(): Promise<any> {
   const cfgPath = path.join(process.cwd(), "user_data", "config.json");
-  const raw = await fs.readFile(cfgPath, "utf-8");
-  return JSON.parse(raw);
+  try {
+    const raw = await fs.readFile(cfgPath, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("Failed to read user config:", err);
+    throw new Error("Failed to read user_data/config.json");
+  }
 }
 
 async function writeUserConfig(nextConfig: any): Promise<void> {
   const cfgPath = path.join(process.cwd(), "user_data", "config.json");
-  await fs.writeFile(cfgPath, JSON.stringify(nextConfig, null, 2), "utf-8");
-  await storage.syncWithFilesystem();
+  try {
+    await fs.writeFile(cfgPath, JSON.stringify(nextConfig, null, 2), "utf-8");
+    await storage.syncWithFilesystem();
+  } catch (err) {
+    console.error("Failed to write user config:", err);
+    throw new Error("Failed to write user_data/config.json");
+  }
 }
 
 function applyConfigUpdatePatchToConfig(config: any, input: any): any {
@@ -228,7 +247,11 @@ async function applyValidatedStrategyEdits(strategyPath: string, edits: any[], d
   }
   const parsed = JSON.parse(res.out);
   if (!dryRun) {
-    await storage.syncWithFilesystem();
+    try {
+      await storage.syncWithFilesystem();
+    } catch (err) {
+      console.error("Failed to sync filesystem after applying strategy edits:", err);
+    }
   }
   return parsed;
 }
@@ -318,30 +341,84 @@ function suiteAggregates(suite: Array<{ bt: any; timerange?: string }>): {
   };
 }
 
-async function callOpenRouterChat(input: { model: string; system: string; user: string; maxTokens?: number }): Promise<string | null> {
+async function callOpenRouterChat(input: { model: string; system: string; user: string; maxTokens?: number }, retries = 2): Promise<string | null> {
   const apiKey = getOpenRouterApiKey();
   const baseUrl = getOpenRouterBaseUrl();
-  if (!apiKey) return null;
-  const upstreamRes = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://replit.com",
-    },
-    body: JSON.stringify({
-      model: input.model,
-      messages: [
-        { role: "system", content: input.system },
-        { role: "user", content: input.user },
-      ],
-      max_tokens: typeof input.maxTokens === "number" ? input.maxTokens : 900,
-    }),
-  });
-  if (!upstreamRes.ok) return null;
-  const data = (await upstreamRes.json()) as any;
-  const content = String(data?.choices?.[0]?.message?.content ?? "").trim();
-  return content || null;
+  if (!apiKey) {
+    throw new Error("OpenRouter API key is missing (set OPENROUTER_API_KEY or AI_INTEGRATIONS_OPENROUTER_API_KEY)");
+  }
+
+  // Fallback models in order of preference
+  const fallbackModels = [
+    input.model,
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+  ];
+
+  let lastError: Error | null = null;
+
+  for (const model of fallbackModels) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 45_000);
+      let upstreamRes: Response;
+      try {
+        upstreamRes = await fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://replit.com",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: model,
+            messages: [
+              { role: "system", content: input.system },
+              { role: "user", content: input.user },
+            ],
+            max_tokens: typeof input.maxTokens === "number" ? input.maxTokens : 900,
+          }),
+        });
+      } catch (e: any) {
+        const msg = e?.name === "AbortError" ? "OpenRouter request timed out" : (e?.message || String(e));
+        lastError = new Error(msg);
+        clearTimeout(timeout);
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        break;
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!upstreamRes.ok) {
+        const body = await upstreamRes.text().catch(() => "");
+        lastError = new Error(`OpenRouter request failed (${upstreamRes.status}): ${body || upstreamRes.statusText}`);
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        break;
+      }
+
+      const data = (await upstreamRes.json()) as any;
+      const content = String(data?.choices?.[0]?.message?.content ?? "").trim();
+      if (!content) {
+        lastError = new Error("Empty response from model");
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        break;
+      }
+      return content;
+    }
+  }
+
+  throw lastError || new Error("All models failed to return a response");
 }
 
 let cachedFeeConfig: { maker: number | null; taker: number | null; at: number } = { maker: null, taker: null, at: 0 };
@@ -380,7 +457,14 @@ async function runPythonTool(scriptPath: string, args: string[], stdinObj?: any)
     PATH: process.env.PATH ? `${venvBin}:${process.env.PATH}` : venvBin,
   };
 
-  const proc = spawn(pythonBin, [scriptPath, ...args], { cwd: projectRoot, env, stdio: ["pipe", "pipe", "pipe"] });
+  let pythonCmd = pythonBin;
+  try {
+    await fs.access(pythonBin);
+  } catch {
+    pythonCmd = "python3";
+  }
+
+  const proc = spawn(pythonCmd, [scriptPath, ...args], { cwd: projectRoot, env, stdio: ["pipe", "pipe", "pipe"] });
   let out = "";
   let err = "";
   proc.stdout.on("data", (d) => (out += d.toString()));
@@ -391,7 +475,25 @@ async function runPythonTool(scriptPath: string, args: string[], stdinObj?: any)
   proc.stdin.end();
 
   const code = await new Promise<number>((resolve) => {
-    proc.on("close", (c) => resolve(typeof c === "number" ? c : 1));
+    const killTimer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+      }
+      err += "\nPython tool timed out.";
+      resolve(124);
+    }, 30_000);
+
+    proc.on("error", (e) => {
+      clearTimeout(killTimer);
+      err += `\n${(e as any)?.message || String(e)}`;
+      resolve(1);
+    });
+
+    proc.on("close", (c) => {
+      clearTimeout(killTimer);
+      resolve(typeof c === "number" ? c : 1);
+    });
   });
 
   return { code, out, err };
@@ -717,7 +819,11 @@ async function runDiagnosticLoopRun(runId: string) {
     const abs = resolvePathWithinProject(strategyPath);
     const content = await fs.readFile(p, "utf-8");
     await fs.writeFile(abs, content, "utf-8");
-    await storage.syncWithFilesystem();
+    try {
+      await storage.syncWithFilesystem();
+    } catch (err) {
+      console.error("Failed to sync filesystem after restoring snapshot:", err);
+    }
   };
 
   const makeBacktestInput = (timeframe: string) => {
@@ -760,7 +866,8 @@ async function runDiagnosticLoopRun(runId: string) {
         runInput: input,
       };
       await fs.writeFile(path.join(runDir, "snapshot.json"), JSON.stringify(snapshot, null, 2), "utf-8");
-    } catch {
+    } catch (e) {
+      console.error("Failed to write backtest snapshot:", { backtestId: backtest.id }, e);
     }
 
     runActualBacktest(backtest.id, input);
@@ -785,13 +892,13 @@ async function runDiagnosticLoopRun(runId: string) {
     try {
       const raw = await fs.readFile(summaryPath, "utf-8");
       btData = JSON.parse(raw);
-    } catch {
-      btData = null;
-    }
-    if (!btData) {
+    } catch (e) {
+      logOnce(`backtest:${backtestId}:summary`, "Failed to read/parse backtest summary JSON; falling back to parser", e);
       btData = parser.parse(String(backtestId));
     }
-    if (!btData) throw new Error("Backtest results not found");
+    if (!btData) {
+      throw new Error("Backtest results not found");
+    }
 
     const phase1 = new Phase1Structural();
     const structural = await phase1.analyze(btData, strategyContent, { backtestId });
@@ -1077,7 +1184,11 @@ async function runDiagnosticLoopRun(runId: string) {
         await applyStrategyAttrChanges(strategyPath, changes);
       }
 
-      await storage.syncWithFilesystem();
+      try {
+        await storage.syncWithFilesystem();
+      } catch (err) {
+        console.error("Failed to sync filesystem after applying changes:", err);
+      }
       const afterStrategy = await readStrategy();
       const appliedDiff = simpleDiffText(beforeStrategy, afterStrategy);
       await storage.updateDiagnosticLoopIteration(baselineRowId, { appliedDiff } as any);
@@ -1505,11 +1616,20 @@ async function runRefinementRun(runId: string) {
   };
 
   const restoreConfigSnapshot = async (p: string) => {
-    await restoreConfigSnapshotFromFile(p);
+    const raw = await fs.readFile(p, "utf-8");
+    const parsed = JSON.parse(raw);
+    await writeUserConfig(parsed);
   };
 
   const restoreStrategySnapshot = async (p: string) => {
-    await restoreStrategySnapshotFromFile(strategyPath, p);
+    const abs = resolvePathWithinProject(strategyPath);
+    const content = await fs.readFile(p, "utf-8");
+    await fs.writeFile(abs, content, "utf-8");
+    try {
+      await storage.syncWithFilesystem();
+    } catch (err) {
+      console.error("Failed to sync filesystem after restoring snapshot:", err);
+    }
   };
 
   const runSuite = async (suiteTag: string) => {
@@ -1535,15 +1655,21 @@ async function runRefinementRun(runId: string) {
       return Number.isFinite(dt.getTime()) ? dt : null;
     };
 
-    const windowDays = Number(rolling.windowDays ?? 30);
-    const stepDays = Number(rolling.stepDays ?? rolling.windowDays ?? 30);
+    const windowDays = Number(rolling.windowDays);
+    const stepDays = Number(rolling.stepDays ?? rolling.windowDays);
     const count = Number(rolling.count ?? 4);
     const end = typeof rolling.end === "string" ? parseIsoDate(String(rolling.end)) : null;
     const endDate = end ?? new Date();
 
-    if (!Number.isFinite(windowDays) || windowDays <= 0) throw new Error("rolling.windowDays must be > 0");
-    if (!Number.isFinite(stepDays) || stepDays <= 0) throw new Error("rolling.stepDays must be > 0");
-    if (!Number.isFinite(count) || count <= 0) throw new Error("rolling.count must be > 0");
+    if (!Number.isFinite(windowDays) || windowDays <= 0) {
+      throw new Error("rolling.windowDays must be > 0");
+    }
+    if (!Number.isFinite(stepDays) || stepDays <= 0) {
+      throw new Error("rolling.stepDays must be > 0");
+    }
+    if (!Number.isFinite(count) || count <= 0) {
+      throw new Error("rolling.count must be > 0");
+    }
 
     const ranges: Array<{ from: string; to: string }> = [];
     for (let i = 0; i < count; i++) {
@@ -1692,7 +1818,9 @@ async function runRefinementRun(runId: string) {
         runState = { ...(runState || {}), configOverridesApplied: true };
         await storage.updateAiRefinementRun(runId, { report: runState } as any);
       }
-    } catch {
+    } catch (e) {
+      console.error("Failed to apply refinement config overrides:", { runId }, e);
+      throw e;
     }
 
     const ensureSnapshotPaths = async () => {
@@ -1883,9 +2011,22 @@ async function runRefinementRun(runId: string) {
         2,
       );
 
-      const aiOut = await callOpenRouterChat({ model, system: sys, user, maxTokens: 900 });
+      let aiOut: string | null = null;
+      try {
+        aiOut = await callOpenRouterChat({ model, system: sys, user, maxTokens: 900 });
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "ai_error", validation: { message: msg } } as any);
+        completedStopReason = "ai_error";
+        runState = { ...(runState || {}), error: msg };
+        await storage.updateAiRefinementRun(runId, { report: runState } as any);
+        break;
+      }
       if (!aiOut) {
         await storage.updateAiRefinementIteration(it.id, { stage: "failed", failure: "ai_no_response" } as any);
+        completedStopReason = "ai_no_response";
+        runState = { ...(runState || {}), error: "AI returned an empty response." };
+        await storage.updateAiRefinementRun(runId, { report: runState } as any);
         break;
       }
 
@@ -2093,7 +2234,8 @@ async function runRefinementRun(runId: string) {
     try {
       await restoreStrategySnapshot(bestStrategySnap || baselineStrategySnap);
       await restoreConfigSnapshot(bestConfigSnap || baselineConfigSnap);
-    } catch {
+    } catch (e) {
+      console.error("Failed to restore snapshots after refinement failure:", { runId }, e);
     }
     await storage.updateAiRefinementRun(runId, {
       status: "failed",
@@ -2124,6 +2266,27 @@ function clampText(value: unknown, maxChars: number): string {
   return `${s.slice(0, maxChars)}\n\n[...truncated ${s.length - maxChars} chars...]`;
 }
 
+function extractFirstJsonObject(text: string): any | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  const parsed = parseJsonBlock(raw, "json") ?? parseLooseJson(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed;
+}
+
+function isBacktestRelatedMessage(message: string): boolean {
+  const m = String(message || "").toLowerCase();
+  if (!m.trim()) return true;
+  if (/\b(backtest|results?|profit|loss|drawdown|dd|win\s*rate|winrate|trades?|roi|stoploss|trailing|sharpe|expectancy|profit\s*factor)\b/.test(m)) {
+    return true;
+  }
+  if (/\b(analy|analysis|explain|interpret|improve|optimi|refine|why)\b/.test(m)) {
+    return true;
+  }
+  return false;
+}
+
 function fileWindowByLine(content: string, lineNumber: number | undefined, radiusLines: number): string {
   const lines = String(content || "").split(/\r?\n/);
   if (lines.length === 0) return "";
@@ -2144,7 +2307,11 @@ async function restoreStrategySnapshotFromFile(strategyPath: string, snapshotPat
   const abs = resolvePathWithinProject(strategyPath);
   const content = await fs.readFile(snapshotPath, "utf-8");
   await fs.writeFile(abs, content, "utf-8");
-  await storage.syncWithFilesystem();
+  try {
+    await storage.syncWithFilesystem();
+  } catch (err) {
+    console.error("Failed to sync filesystem after restoring snapshot:", err);
+  }
 }
 
 type DerivedTradeMetrics = {
@@ -2325,7 +2492,7 @@ function applyBacktestOverridesToConfig(baseConfig: any, runInput: any) {
 const boxDrawingCharsRe = /[┏┓┗┛┳┻┡┠┨┼┃│─┌┐└┘]/;
 
 function filterFreqtradeStderrChunk(chunk: string) {
-  const text = String(chunk ?? "");
+  const text = String(chunk || "");
   const lines = text.split(/\r?\n/);
   const kept: string[] = [];
 
@@ -2380,7 +2547,7 @@ function resolvePathWithinProject(candidate: string): string {
 }
 
 function filterFreqtradeStdoutChunk(chunk: string) {
-  const text = String(chunk ?? "");
+  const text = String(chunk || "");
   const lines = text.split(/\r?\n/);
   const kept: string[] = [];
 
@@ -2497,6 +2664,9 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
+  // Register validation routes
+  app.use("/api", validationRouter);
+
   // === Files Endpoints ===
   app.get(api.files.list.path, async (req, res) => {
     const files = await storage.getFiles();
@@ -2577,7 +2747,8 @@ export async function registerRoutes(
         try {
           const parsed = JSON.parse(out);
           return res.json(parsed);
-        } catch {
+        } catch (e) {
+          console.error("Invalid JSON from strategy parser; returning generic success", e);
           return res.json({ success: true, dryRun: Boolean(dryRun) });
         }
       });
@@ -2659,7 +2830,8 @@ export async function registerRoutes(
         try {
           const parsed = JSON.parse(out);
           return res.json(parsed);
-        } catch {
+        } catch (e) {
+          console.error("Invalid JSON from strategy params parser", e);
           return res.status(500).json({ message: "Invalid parser output", details: err || out });
         }
       });
@@ -3048,193 +3220,319 @@ export async function registerRoutes(
       const { message, model, context } = input;
 
       const apiKey = getOpenRouterApiKey();
-      const baseUrl = getOpenRouterBaseUrl();
 
       if (!apiKey) {
         return res.status(500).json({ message: "OpenRouter API key not configured" });
       }
 
-      // Build system prompt with context
-      let systemPrompt = `You are an elite FreqTrade strategy developer and technical analyst.
-Your expertise covers the entire FreqTrade ecosystem, including strategy development, backtesting, hyperopt, and live trading.
+      const ctx: any = context || {};
+      const backtestIdRaw = Number(ctx?.lastBacktest?.id);
+      const backtestId = Number.isFinite(backtestIdRaw) ? backtestIdRaw : null;
 
-CRITICAL INSTRUCTIONS:
-1. Python/FreqTrade Excellence: Write clean, idiomatic Python. Use IStrategy standards. Suggest efficient use of talib, qtpylib, and pandas.
-2. Logic & Edge: Focus on finding trading edges. Suggest improvements to populate_indicators, populate_entry_trend, and populate_exit_trend.
-3. Risk Management: Always consider stoploss, trailing stoploss, and ROI. Warn about look-ahead bias and overfitting.
-4. Backtest Analysis: Help users interpret backtest results (Profit, Drawdown, Win Rate, Sharpe Ratio).
-5. Precision: Use the provided context (line numbers, selection) to give highly specific answers. If you see a bug, explain WHY it's a bug in a trading context.
-6. Documentation: Provide clear, educational comments within code blocks.
+      const wantsBacktestAnalysis =
+        Boolean(backtestId || ctx?.backtestResults) &&
+        isBacktestRelatedMessage(message);
 
-Grounding Rules (Non-Negotiable):
-- Do NOT invent facts (pairs traded, timeframe, trade duration, win/loss counts, profit factor, etc.). If a value is not explicitly present in the provided context, label it as unknown and ask for it.
-- If you reference a file/function/parameter, it MUST exist in the provided file content. If it does not exist, ask the user to open the correct strategy file and do not guess.
-- When you make recommendations based on metrics, tie each recommendation to the specific metric(s) provided (e.g., win_rate, max_drawdown, profit_total, total_trades).
+      if (wantsBacktestAnalysis) {
+        const AnalysisSchema = z
+          .object({
+            summary: z.array(z.string()).min(1).max(8),
+            metrics_used: z.array(z.string()).optional(),
+            metrics_to_recommendation_mapping: z.array(z.string()).min(1).max(12),
+            next_experiments: z.array(z.string()).min(1).max(6),
+            questions: z.array(z.string()).optional(),
+            actions: z
+              .array(
+                z.object({
+                  action: z.enum(["run_backtest", "run_batch_backtest", "run_diagnostic"]),
+                  payload: z.any(),
+                  label: z.string().optional(),
+                }),
+              )
+              .optional(),
+          })
+          .strict();
 
-Default Behavior:
-- If the user request is vague (e.g. "improve", "what's missing", "why is this bad") and backtest results are provided, you MUST proactively analyze the metrics and explain what is missing / likely wrong (expectancy, drawdown control, trade quality, exit logic, costs/slippage, overfitting).
-- If appropriate, propose concrete next steps (parameter changes, additional filters, risk controls) and explain why.
+        const fmtPctAbs = (v: unknown, digits = 2) => {
+          const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+          if (!Number.isFinite(n)) return "N/A";
+          return `${n.toFixed(digits)}%`;
+        };
 
-When Providing Code:
-- ALWAYS wrap code in markdown blocks with the language identifier (e.g., \`\`\`python).
-- Ensure generated code is ready for the "Apply" feature.
-- Include necessary imports if they are missing from the context.`;
+        const br = ctx?.backtestResults;
+        const metricsJson: Record<string, { value: number | null; unit: string }> = {
+          profit_total_pct: { value: Number.isFinite(Number(br?.profit_total)) ? Number(br.profit_total) : null, unit: "pct" },
+          win_rate_pct: { value: Number.isFinite(Number(br?.win_rate)) ? Number(br.win_rate) : null, unit: "pct" },
+          max_drawdown_pct: { value: Number.isFinite(Number(br?.max_drawdown)) ? Number(br.max_drawdown) : null, unit: "pct" },
+          total_trades: { value: Number.isFinite(Number(br?.total_trades)) ? Number(br.total_trades) : null, unit: "count" },
+          avg_profit_per_trade_pct: { value: Number.isFinite(Number(br?.avg_profit)) ? Number(br.avg_profit) : null, unit: "pct" },
+          sharpe: { value: Number.isFinite(Number(br?.sharpe)) ? Number(br.sharpe) : null, unit: "ratio" },
+        };
 
-      systemPrompt += `\n\nConfig Updates:\n- If the user asks to change backtest configuration (strategy name, timeframe, stake, dates, pairs, limits), output a single \`\`\`json code block containing ONLY the keys to change from: strategy, timeframe, stake_amount, max_open_trades, tradable_balance_ratio, stoploss, trailing_stop, trailing_stop_positive, trailing_stop_positive_offset, trailing_only_offset_is_reached, minimal_roi, backtest_date_from, backtest_date_to, pairs. Example:\n\`\`\`json\n{\n  "strategy": "AIStrategy",\n  "timeframe": "5m",\n  "max_open_trades": 2,\n  "stoploss": -0.1,\n  "trailing_stop": true,\n  "trailing_stop_positive": 0.01,\n  "trailing_stop_positive_offset": 0.02,\n  "trailing_only_offset_is_reached": false,\n  "minimal_roi": {}\n}\n\`\`\``;
+        const configSummary: Record<string, any> = (() => {
+          const cfg = ctx?.lastBacktest?.config;
+          if (!cfg || typeof cfg !== "object") return {};
+          const tf = typeof (cfg as any)?.timeframe === "string" ? String((cfg as any).timeframe) : null;
+          const pairs = Array.isArray((cfg as any)?.pairs) ? (cfg as any).pairs.map((p: any) => String(p)).filter(Boolean) : null;
+          const stoploss = typeof (cfg as any)?.stoploss === "number" ? (cfg as any).stoploss : null;
+          const roi = (cfg as any)?.minimal_roi;
+          return {
+            timeframe: tf,
+            pairs: pairs && pairs.length ? pairs : null,
+            pairs_count: pairs ? pairs.length : null,
+            stoploss: stoploss,
+            minimal_roi: roi && typeof roi === "object" ? roi : null,
+          };
+        })();
 
-      systemPrompt += `\n\nExecutable Actions (Optional):\n- If the user asks you to RUN a backtest, validate over different time ranges, or do a multi-range check, you MAY output a single \`\`\`action code block containing JSON with this shape:\n\`\`\`action\n{\n  \"action\": \"run_backtest\" | \"run_batch_backtest\" | \"run_diagnostic\",\n  \"payload\": { ... }\n}\n\`\`\`\n- For action \"run_backtest\", payload may include:\n  - strategyName (optional)\n  - config: { timeframe, stake_amount, backtest_date_from, backtest_date_to, timerange, pairs, max_open_trades, tradable_balance_ratio, ... }\n- For action \"run_batch_backtest\", payload may include:\n  - strategyName (optional)\n  - baseConfig: { timeframe, stake_amount, pairs, max_open_trades, tradable_balance_ratio, ... }\n  - ranges: [{\"from\":\"YYYY-MM-DD\",\"to\":\"YYYY-MM-DD\"}, ...] OR rolling: {\"windowDays\":90,\"stepDays\":90,\"count\":4,\"end\":\"YYYY-MM-DD\"}\n- For action \"run_diagnostic\", payload must include:\n  - backtestId (required)\n  - strategyPath (optional)\n- If the user asks for \"validate across time ranges\" but does NOT specify the ranges, default to a rolling plan of 4 windows of 90 days ending today.`;
-
-      systemPrompt += `\n\nTargeted Edits:\n- If the user has selected code, assume they want a targeted replacement. Return a single \`\`\`python code block containing ONLY the updated replacement snippet for the selected block (typically one function), and keep the same function name unless the user explicitly asks to rename it.\n- If the user has NOT selected code but the cursor is inside a function (cursorFunctionName is provided), prefer modifying that function and return ONLY that function definition as a single \`\`\`python code block.`;
-      systemPrompt += `\n\nValidation Requirement:\n- Before you propose a code change, confirm that the function/class/attribute you are changing EXISTS in the provided file content.\n- If it does NOT exist, ask the user to open the correct strategy file and do NOT guess.\n- Prefer returning a single existing function (by name) rather than introducing new ones unless explicitly requested.`;
-
-      systemPrompt += `\n\nResponse Quality Bar:\n- Start with a 3–5 line summary grounded in provided metrics.\n- Then provide: (1) what looks good, (2) biggest risk, (3) the top 3 next experiments ordered by expected impact.\n- Every recommendation MUST cite the metric(s) that justify it (e.g., win_rate, profit_factor, expectancy, avg_win/loss, max_drawdown, trades_per_day).\n- If you need missing metrics to be confident (expectancy, avg profit, profit factor, fees/slippage assumptions, timeframe/pairs), ask concise follow-up questions instead of assuming.\n- If metrics are ambiguous or insufficient, present CHOICES with \"Run Diagnostic\" vs \"Continue with current metrics\" vs \"Ask for additional metrics\".\n`;
-
-      systemPrompt += `\n\nMetrics-to-Recommendation Mapping:\n- ALWAYS include a section titled \"Metrics-to-Recommendation Mapping\".\n- Provide 3–6 bullet points in the format:\n  - <metric> → <recommendation> (why)\n- Each recommendation must reference a metric value from the context.\n`;
-
-      systemPrompt += `\n\nFormatting Rules:\n- When you propose a concrete change, you MUST express it as one of these machine-readable blocks:\n  - \`\`\`python (for strategy code)\n  - \`\`\`json (for config patch)\n  - \`\`\`action (for running tools like backtest/diagnostic)\n- Avoid pseudo-code that cannot be applied.\n`;
-
-      systemPrompt += `\n\nUser Choice UI:\n- If you ask the user to choose between options, format them like this so the UI can show buttons:\nCHOICES:\n1) <option one>\n2) <option two>\n3) <option three>\n- Keep each option on a single line.\n`;
-      
-      if (context) {
-        if (context.fileName) {
-          systemPrompt += `\n\nUser is working on file: ${context.fileName}`;
-        }
-        if (context.lineNumber) {
-          systemPrompt += `\nCursor is at line: ${context.lineNumber}`;
-        }
-        if ((context as any).cursorFunctionName) {
-          systemPrompt += `\nCursor is inside function: ${(context as any).cursorFunctionName}`;
-        }
-        if (context.selectedCode) {
-          const selected = clampText(context.selectedCode, 6000);
-          systemPrompt += `\n\nUser has selected this code (lines starting around ${context.lineNumber || 'unknown'}):\n\`\`\`\n${selected}\n\`\`\``;
-        }
-        if (context.fileContent) {
-          const raw = String(context.fileContent);
-          const safe =
-            raw.length > 20000
-              ? fileWindowByLine(raw, context.lineNumber, 160)
-              : raw;
-          systemPrompt += `\n\nFile content for reference:\n\`\`\`\n${clampText(safe, 22000)}\n\`\`\``;
-        }
-        if ((context as any).lastBacktest) {
-          const lb = (context as any).lastBacktest as any;
-          if (lb?.id || lb?.strategyName) {
-            systemPrompt += `\n\nLATEST BACKTEST CONTEXT:\n- Backtest ID: ${lb?.id ?? "N/A"}\n- Strategy: ${lb?.strategyName ?? "N/A"}`;
-          }
-          if (lb?.config) {
-            try {
-              systemPrompt += `\n- Backtest Config (raw): ${JSON.stringify(lb.config)}`;
-            } catch {
-              systemPrompt += `\n- Backtest Config (raw): [unserializable]`;
-            }
-          }
-        }
-        if (context.backtestResults) {
-          const br = context.backtestResults;
-          systemPrompt += `\n\nLATEST BACKTEST METRICS:
-- Total Profit: ${br.profit_total}%
-- Win Rate: ${br.win_rate}%
-- Max Drawdown: ${br.max_drawdown}%
-- Total Trades: ${br.total_trades}
-- Avg Profit/Trade: ${br.avg_profit || 'N/A'}%
-- Sharpe Ratio: ${br.sharpe || 'N/A'}
-
-Reason about these metrics. For example:
-- High win rate but negative profit suggests losing expectancy (big losers).
-- Very low trade count (< 20-30) suggests statistical insignificance.
-- High drawdown (> 20%) with low profit suggests poor risk/reward.
-- Perfect backtests on low trade counts often indicate overfitting.`;
-        }
-
-        if ((context as any).lastBacktest?.config) {
-          const cfg = ((context as any).lastBacktest as any).config;
-          const cfgMakerRaw = cfg?.exchange?.fees?.maker;
-          const cfgTakerRaw = cfg?.exchange?.fees?.taker;
-          const cfgMaker = typeof cfgMakerRaw === "number" ? cfgMakerRaw : typeof cfgMakerRaw === "string" ? Number(cfgMakerRaw) : NaN;
-          const cfgTaker = typeof cfgTakerRaw === "number" ? cfgTakerRaw : typeof cfgTakerRaw === "string" ? Number(cfgTakerRaw) : NaN;
-          const fileFees = await getExchangeFeesFromConfig();
-          const maker = Number.isFinite(cfgMaker) ? cfgMaker : fileFees.maker;
-          const taker = Number.isFinite(cfgTaker) ? cfgTaker : fileFees.taker;
-          const makerText = maker == null ? "unknown" : String(maker);
-          const takerText = taker == null ? "unknown" : String(taker);
-          systemPrompt += `\n\nFEES:\n- maker: ${makerText}\n- taker: ${takerText}\n- Note: trade profit_abs / profit_ratio are net of fee_open + fee_close (as provided by Freqtrade).`;
-        } else {
-          const fileFees = await getExchangeFeesFromConfig();
-          if (fileFees.maker != null || fileFees.taker != null) {
-            systemPrompt += `\n\nFEES:\n- maker: ${fileFees.maker == null ? "unknown" : String(fileFees.maker)}\n- taker: ${fileFees.taker == null ? "unknown" : String(fileFees.taker)}\n- Note: trade profit_abs / profit_ratio are net of fee_open + fee_close (as provided by Freqtrade).`;
-          }
-        }
-
-        if ((context as any).lastBacktest?.id) {
-          const backtestId = Number((context as any).lastBacktest.id);
-          if (Number.isFinite(backtestId)) {
+        if (backtestId != null) {
+          try {
             const backtest = await storage.getBacktest(backtestId);
             const trades = (backtest as any)?.results?.trades;
             const derived = computeDerivedTradeMetrics(Array.isArray(trades) ? trades : []);
-
             if (derived) {
-              const expectancyText = derived.units === "ratio" ? fmtPct(derived.expectancy) : fmtMetric(derived.expectancy);
-              const avgWinText = derived.units === "ratio" ? fmtPct(derived.avgWin) : fmtMetric(derived.avgWin);
-              const avgLossText = derived.units === "ratio" ? fmtPct(derived.avgLoss) : fmtMetric(derived.avgLoss);
+              const toPctOrAbs = (v: number | null | undefined): number | null => {
+                if (v == null || !Number.isFinite(v)) return null;
+                return derived.units === "ratio" ? v * 100 : v;
+              };
+              const pctOrAbsUnit = derived.units === "ratio" ? "pct" : "abs";
 
-              systemPrompt += `\n\nDERIVED METRICS (computed from trade list):`;
-              systemPrompt += `\n- Coverage: ${(derived.coverageRatio * 100).toFixed(0)}% of trades have usable profit data`;
-              systemPrompt += `\n- Expectancy (avg profit/trade): ${expectancyText}`;
-              systemPrompt += `\n- Avg Win: ${avgWinText}`;
-              systemPrompt += `\n- Avg Loss: ${avgLossText}`;
-              systemPrompt += `\n- Profit Factor: ${fmtMetric(derived.profitFactor, 2)}`;
-              systemPrompt += `\n- Win/Loss Ratio: ${fmtMetric(derived.winLossRatio, 2)}`;
-              systemPrompt += `\n- Avg Trade Duration: ${fmtMetric(derived.avgTradeDurationMin, 1)} minutes`;
-              systemPrompt += `\n- Trades per Day: ${fmtMetric(derived.tradesPerDay, 2)}`;
-              systemPrompt += `\n- Winners/Losers: ${derived.winners}/${derived.losers}`;
-
-              if (derived.totalTrades < 30) {
-                systemPrompt += `\nNOTE: Trade sample is small (<30). Avoid aggressive tuning and recommend longer timerange or more pairs.`;
-              }
-            } else {
-              systemPrompt += `\n\nDERIVED METRICS: unavailable (no trade list in backtest results).`;
+              metricsJson.expectancy = { value: toPctOrAbs(derived.expectancy), unit: pctOrAbsUnit };
+              metricsJson.avg_win = { value: toPctOrAbs(derived.avgWin), unit: pctOrAbsUnit };
+              metricsJson.avg_loss = { value: toPctOrAbs(derived.avgLoss), unit: pctOrAbsUnit };
+              metricsJson.profit_factor = { value: derived.profitFactor ?? null, unit: "ratio" };
+              metricsJson.win_loss_ratio = { value: derived.winLossRatio ?? null, unit: "ratio" };
+              metricsJson.avg_trade_duration_min = { value: derived.avgTradeDurationMin ?? null, unit: "minutes" };
+              metricsJson.trades_per_day = { value: derived.tradesPerDay ?? null, unit: "ratio" };
+              metricsJson.winners = { value: derived.winners ?? null, unit: "count" };
+              metricsJson.losers = { value: derived.losers ?? null, unit: "count" };
+              metricsJson.coverage_ratio_pct = { value: Number.isFinite(derived.coverageRatio) ? derived.coverageRatio * 100 : null, unit: "pct" };
             }
+          } catch (e) {
+            logOnce("ai:chat:derived", "Failed to compute derived backtest metrics", e);
           }
         }
+
+        const allowedMetricKeys = Object.keys(metricsJson);
+
+        const system = [
+          "You are an elite FreqTrade strategy developer and backtest analyst.",
+          "You must return a single valid JSON object and nothing else.",
+          "Grounding rules:",
+          "- Only reference metric keys that exist in METRICS_JSON.",
+          "- Do not introduce numeric metric values in text (no percentages or figures). Refer to metrics by key only.",
+          "- If info is missing, add it to 'questions' instead of assuming.",
+          "Output schema (JSON):",
+          "- summary: string[] (1-8)",
+          "- metrics_used?: string[] (subset of metric keys)",
+          "- metrics_to_recommendation_mapping: string[] (format: <metric_key> -> <recommendation> (why))",
+          "- next_experiments: string[] (top 3-6, ordered)",
+          "- questions?: string[]",
+          "- actions?: {action,payload,label?}[] where action is one of run_backtest/run_batch_backtest/run_diagnostic",
+          "Constraints:",
+          `- Allowed metric keys: ${allowedMetricKeys.join(", ")}`,
+          "- Only include actions that directly support your next_experiments.",
+          "Context:",
+          `METRICS_JSON=${JSON.stringify(metricsJson)}`,
+          `CONFIG_SUMMARY_JSON=${JSON.stringify(configSummary)}`,
+        ].join("\n");
+
+        const user = [
+          "User message:",
+          String(message || "").trim(),
+        ].join("\n");
+
+        let modelOut: string | null = null;
+        try {
+          modelOut = await callOpenRouterChat({ model, system, user, maxTokens: 700 });
+        } catch (e: any) {
+          const msg = String(e?.message || e || "AI request failed");
+          return res.status(502).json({ message: msg });
+        }
+
+        const containsPercentLiteral = (value: string): boolean => /-?\d+(?:\.\d+)?\s*%/.test(value);
+
+        const isSafeAnalysisText = (data: any): boolean => {
+          const fields = [
+            ...(Array.isArray(data?.summary) ? data.summary : []),
+            ...(Array.isArray(data?.metrics_to_recommendation_mapping) ? data.metrics_to_recommendation_mapping : []),
+            ...(Array.isArray(data?.next_experiments) ? data.next_experiments : []),
+            ...(Array.isArray(data?.questions) ? data.questions : []),
+          ];
+          return !fields.some((s) => containsPercentLiteral(String(s || "")));
+        };
+
+        const tryParse = (txt: string | null) => {
+          const parsed = extractFirstJsonObject(txt || "");
+          if (!parsed) return null;
+          const validated = AnalysisSchema.safeParse(parsed);
+          if (!validated.success) return null;
+          if (!isSafeAnalysisText(validated.data)) return null;
+          return validated.data;
+        };
+
+        let analysis = tryParse(modelOut);
+
+        if (!analysis) {
+          const repairSystem = [
+            "You are a JSON repair assistant.",
+            "Return ONLY a valid JSON object matching this schema:",
+            "{summary:string[], metrics_used?:string[], metrics_to_recommendation_mapping:string[], next_experiments:string[], questions?:string[], actions?:{action,payload,label?}[]}",
+            `Allowed metric keys: ${allowedMetricKeys.join(", ")}`,
+            "Do not include any markdown.",
+          ].join("\n");
+          const repairUser = [
+            "Fix this into valid JSON only:",
+            String(modelOut || ""),
+          ].join("\n");
+          let repaired: string | null = null;
+          try {
+            repaired = await callOpenRouterChat({ model, system: repairSystem, user: repairUser, maxTokens: 450 });
+          } catch {
+            repaired = null;
+          }
+          analysis = tryParse(repaired);
+        }
+
+        if (!analysis) {
+          analysis = {
+            summary: ["I can analyze this backtest, but I couldn’t reliably parse the AI output into a grounded format."],
+            metrics_to_recommendation_mapping: ["profit_total_pct -> Run diagnostics / inspect losers vs winners (missing grounded analysis output)"] ,
+            next_experiments: ["Run diagnostics on the latest backtest", "Increase timerange / pairs to improve statistical confidence", "Review exit logic to reduce large losers"],
+            questions: ["Do you want me to prioritize reducing drawdown or improving profitability first?"],
+            actions: backtestId != null ? [{ action: "run_diagnostic", payload: { backtestId }, label: "Run Diagnostic" }] : undefined,
+          } as any;
+        }
+
+        const analysisObj = analysis as any;
+
+        const mappingLines = Array.isArray(analysisObj.metrics_to_recommendation_mapping)
+          ? analysisObj.metrics_to_recommendation_mapping
+          : [];
+        const filteredMapping = mappingLines
+          .map((l: any) => String(l || "").trim())
+          .filter(Boolean)
+          .filter((l: any) => {
+            const key = l.split("->")[0]?.trim() || "";
+            return allowedMetricKeys.includes(key);
+          });
+
+        const renderMetricValue = (key: string): string => {
+          const m = metricsJson[key];
+          if (!m) return "N/A";
+          if (m.value == null || !Number.isFinite(m.value)) return "N/A";
+          if (m.unit === "pct") return fmtPctAbs(m.value);
+          if (m.unit === "ratio") return String(m.value.toFixed(3));
+          if (m.unit === "minutes") return `${m.value.toFixed(1)} min`;
+          if (m.unit === "abs") return String(m.value.toFixed(3));
+          return String(m.value);
+        };
+
+        const headerLines: string[] = [];
+        if (backtestId != null) headerLines.push(`Backtest ID: ${backtestId}`);
+        if (typeof ctx?.lastBacktest?.strategyName === "string" && ctx.lastBacktest.strategyName.trim()) {
+          headerLines.push(`Strategy: ${ctx.lastBacktest.strategyName}`);
+        }
+        if (typeof configSummary.timeframe === "string" && configSummary.timeframe) {
+          headerLines.push(`Timeframe: ${configSummary.timeframe}`);
+        }
+        if (Number.isFinite(Number(configSummary.pairs_count))) {
+          headerLines.push(`Pairs: ${configSummary.pairs_count}`);
+        }
+
+        const out: string[] = [];
+        if (headerLines.length) {
+          out.push(headerLines.join("\n"));
+          out.push("");
+        }
+
+        out.push("### Metrics (from your app / backtest data)");
+        out.push(`- profit_total_pct: ${renderMetricValue("profit_total_pct")}`);
+        out.push(`- win_rate_pct: ${renderMetricValue("win_rate_pct")}`);
+        out.push(`- max_drawdown_pct: ${renderMetricValue("max_drawdown_pct")}`);
+        out.push(`- total_trades: ${renderMetricValue("total_trades")}`);
+        if (metricsJson.expectancy || metricsJson.profit_factor) {
+          out.push(`- expectancy: ${renderMetricValue("expectancy")}`);
+          out.push(`- profit_factor: ${renderMetricValue("profit_factor")}`);
+          out.push(`- avg_win: ${renderMetricValue("avg_win")}`);
+          out.push(`- avg_loss: ${renderMetricValue("avg_loss")}`);
+          out.push(`- avg_trade_duration_min: ${renderMetricValue("avg_trade_duration_min")}`);
+          out.push(`- trades_per_day: ${renderMetricValue("trades_per_day")}`);
+          out.push(`- winners/losers: ${renderMetricValue("winners")}/${renderMetricValue("losers")}`);
+          out.push(`- coverage_ratio_pct: ${renderMetricValue("coverage_ratio_pct")}`);
+        }
+
+        out.push("");
+        out.push("### Summary");
+        for (const line of analysisObj.summary) out.push(`- ${String(line || "").trim()}`);
+
+        out.push("");
+        out.push("### Metrics-to-Recommendation Mapping");
+        if (filteredMapping.length) {
+          for (const line of filteredMapping) {
+            const [kRaw, restRaw] = line.split("->");
+            const k = String(kRaw || "").trim();
+            const rest = String(restRaw || "").trim();
+            out.push(`- ${k} (${renderMetricValue(k)}) -> ${rest}`);
+          }
+        } else {
+          out.push("- (No valid mapping was produced; ask to run diagnostics if needed.)");
+        }
+
+        out.push("");
+        out.push("### Top next experiments");
+        for (const exp of analysisObj.next_experiments) out.push(`- ${String(exp || "").trim()}`);
+
+        if (Array.isArray(analysisObj.questions) && analysisObj.questions.length) {
+          out.push("");
+          out.push("### Questions (to avoid guessing)");
+          for (const q of analysisObj.questions) out.push(`- ${String(q || "").trim()}`);
+        }
+
+        if (Array.isArray(analysisObj.actions) && analysisObj.actions.length) {
+          for (const a of analysisObj.actions) {
+            out.push("");
+            if (typeof a.label === "string" && a.label.trim()) out.push(`Action: ${a.label.trim()}`);
+            out.push("```action");
+            out.push(JSON.stringify({ action: a.action, payload: a.payload, label: a.label }, null, 2));
+            out.push("```");
+          }
+        }
+
+        return res.json({ response: out.join("\n") });
       }
 
-      systemPrompt += `\n\nWhen providing code suggestions, ALWAYS wrap them in markdown code blocks like: \`\`\`python\n# your code\n\`\`\`.
-Use the "Apply" button feature to help the user.
-If the user asks to "Explain this", "Optimize this", or "Why is this not working", focus your analysis on the provided selection or the full file context.`;
+      let systemPrompt = `You are an elite FreqTrade strategy developer and technical analyst.
+Your expertise covers the entire FreqTrade ecosystem, including strategy development, backtesting, hyperopt, and live trading.
 
-      const upstreamRes = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://replit.com',
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: message }
-          ],
-          max_tokens: 1024,
-        }),
-      });
+Grounding Rules (Non-Negotiable):
+- Do NOT invent facts. If a value is not explicitly present in the provided context, label it as unknown and ask for it.
+- If you reference a file/function/parameter, it MUST exist in the provided file content. If it does not exist, ask the user to open the correct strategy file and do not guess.
+`;
 
-      if (!upstreamRes.ok) {
-        const errorText = await upstreamRes.text();
-        const trimmed = clampText(errorText, 1500);
-        console.error("OpenRouter error:", trimmed);
+      if (ctx?.fileName) systemPrompt += `\nUser is working on file: ${ctx.fileName}`;
+      if (ctx?.lineNumber) systemPrompt += `\nCursor is at line: ${ctx.lineNumber}`;
+      if (ctx?.cursorFunctionName) systemPrompt += `\nCursor is inside function: ${ctx.cursorFunctionName}`;
+      if (ctx?.selectedCode) systemPrompt += `\n\nSelected code:\n\`\`\`\n${clampText(ctx.selectedCode, 6000)}\n\`\`\``;
+      if (ctx?.fileContent) systemPrompt += `\n\nFile content:\n\`\`\`\n${clampText(ctx.fileContent, 22000)}\n\`\`\``;
+
+      let aiResponse: string | null = null;
+      try {
+        aiResponse = await callOpenRouterChat({ model, system: systemPrompt, user: message, maxTokens: 900 });
+      } catch (e: any) {
+        const msg = String(e?.message || e || "AI request failed");
+        return res.status(502).json({ message: msg });
+      }
+
+      const cleaned = typeof aiResponse === "string" ? aiResponse.trim() : "";
+      if (!cleaned) {
         return res.status(502).json({
-          message: "Failed to get AI response",
-          upstreamStatus: upstreamRes.status,
-          details: trimmed,
+          message: "AI provider returned an empty response",
+          details: { model },
         });
       }
 
-      const data = await upstreamRes.json() as { choices: Array<{ message: { content: string } }> };
-      const aiResponse = data.choices?.[0]?.message?.content || "No response generated";
-
-      res.json({ response: aiResponse });
+      res.json({ response: cleaned });
     } catch (err) {
       if (err instanceof z.ZodError) {
         return res.status(400).json({ message: err.errors[0].message });
@@ -3260,7 +3558,9 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         progress: { percent: 0, currentPhase: "queued", phasesCompleted: [] },
       } as any);
 
-      enqueueDiagnosticJob(jobId).catch(() => {});
+      enqueueDiagnosticJob(jobId).catch((err) => {
+        console.error("enqueueDiagnosticJob failed:", err);
+      });
       res.status(202).json({ jobId, status: "queued" });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
@@ -3330,7 +3630,9 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         progress: { percent: 0, iteration: 0, stage: "queued", timeframe: "", step: "queued" } as DiagnosticLoopProgress,
       } as any);
 
-      enqueueDiagnosticLoopRun(runId).catch(() => {});
+      enqueueDiagnosticLoopRun(runId).catch((err) => {
+        console.error("enqueueDiagnosticLoopRun failed:", err);
+      });
       res.status(202).json({ runId, status: "queued" });
     } catch (err: any) {
       if (err instanceof z.ZodError) {
@@ -3412,7 +3714,9 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         progress: { percent: 0, iteration: 0, stage: "queued", step: "queued" } as RefinementProgress,
       } as any);
 
-      enqueueRefinementRun(runId).catch(() => {});
+      enqueueRefinementRun(runId).catch((err) => {
+        console.error("enqueueRefinementRun failed:", err);
+      });
       return res.status(202).json({ runId, status: "queued" });
     } catch (err: any) {
       if (err instanceof z.ZodError) {
@@ -3474,7 +3778,9 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
       progress: { ...(((run as any).progress || {}) as any), stage: "queued", step: "resume" } as any,
     } as any);
 
-    enqueueRefinementRun(runId).catch(() => {});
+    enqueueRefinementRun(runId).catch((err) => {
+      console.error("enqueueRefinementRun failed:", err);
+    });
     return res.json({ success: true, status: "queued" });
   });
 
@@ -3515,7 +3821,9 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
       progress: { percent: 0, iteration: 0, stage: "queued", step: "queued" } as RefinementProgress,
     } as any);
 
-    enqueueRefinementRun(newRunId).catch(() => {});
+    enqueueRefinementRun(newRunId).catch((err) => {
+      console.error("enqueueRefinementRun failed:", err);
+    });
     return res.status(202).json({ runId: newRunId, status: "queued" });
   });
 
@@ -3896,8 +4204,9 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
         if (typeof ex === "string" && ex.trim().length > 0) {
           exchangeName = ex.trim();
         }
-      } catch {
+      } catch (e) {
         // ignore
+        logOnce("coverage:exchangeName", "Failed to read exchange name from config.json; defaulting to binance", e);
       }
 
       const normalizePairToFilename = (pair: string) =>
@@ -4170,8 +4479,8 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
 
           try {
             await Promise.all(checks);
-          } catch {
-            // ignore
+          } catch (e) {
+            logOnce("coverage:checks", "Coverage checks failed", e);
           }
         }
 
@@ -4194,41 +4503,55 @@ If the user asks to "Explain this", "Optimize this", or "Why is this not working
   });
 
   // === Terminal/Command Endpoint ===
-  app.post("/api/cmd", async (req, res) => {
-    try {
-      const { command } = z.object({ command: z.string() }).parse(req.body);
-      
-      // Basic security check: prevent some dangerous commands
-      const forbidden = ["rm -rf", "mkfs", "dd"];
-      if (forbidden.some(f => command.includes(f))) {
-        return res.status(400).json({ output: "Command forbidden for security reasons." });
-      }
+  // === Freqtrade Utilities ===
+  app.get("/api/freqtrade/version", async (_req, res) => {
+    const projectRoot = process.cwd();
+    const venvBin = path.join(projectRoot, ".venv", "bin");
+    const freqtradeBin = path.join(venvBin, "freqtrade");
+    const env = {
+      ...process.env,
+      VIRTUAL_ENV: path.join(projectRoot, ".venv"),
+      PATH: process.env.PATH ? `${venvBin}:${process.env.PATH}` : venvBin,
+    };
 
-      const projectRoot = process.cwd();
-      const venvBin = path.join(projectRoot, ".venv", "bin");
-      const env = {
-        ...process.env,
-        VIRTUAL_ENV: path.join(projectRoot, ".venv"),
-        PATH: process.env.PATH ? `${venvBin}:${process.env.PATH}` : venvBin,
+    let output = "";
+    const maxChars = 50_000;
+    const killAfterMs = 10_000;
+
+    try {
+      const proc = spawn(freqtradeBin, ["--version"], { cwd: projectRoot, env, shell: false });
+
+      const killTimer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }, killAfterMs);
+
+      const append = (chunk: unknown) => {
+        if (output.length >= maxChars) return;
+        output += String(chunk ?? "");
+        if (output.length > maxChars) output = `${output.slice(0, maxChars)}\n...(truncated)\n`;
       };
 
-      const proc = spawn(command, { shell: true, cwd: projectRoot, env });
-      let output = "";
-      
-      proc.stdout.on("data", (data) => {
-        output += data.toString();
-      });
-
-      proc.stderr.on("data", (data) => {
-        output += data.toString();
-      });
+      proc.stdout.on("data", append);
+      proc.stderr.on("data", append);
 
       proc.on("close", (code) => {
-        res.json({ output, code });
+        clearTimeout(killTimer);
+        res.json({ ok: code === 0, output: output.trim() || "", code });
       });
-    } catch (err) {
-      res.status(400).json({ message: "Invalid command request" });
+    } catch (e: any) {
+      res.status(200).json({ ok: false, output: e?.message || "Failed to execute freqtrade", code: 1 });
     }
+  });
+
+  // Deprecated: left in place so older clients fail closed without any execution.
+  app.post("/api/cmd", async (_req, res) => {
+    return res.status(410).json({
+      message: "Deprecated. Use /api/freqtrade/version or dedicated APIs (backtests, download-data, diagnostics).",
+    });
   });
 
   return httpServer;
@@ -4265,8 +4588,15 @@ async function runActualBacktest(backtestId: number, config: any) {
     try {
       const raw = await fs.readFile(baseConfigPath, "utf-8");
       baseConfig = JSON.parse(raw);
-    } catch {
-      baseConfig = {};
+    } catch (e) {
+      console.error("Failed to read base config.json for backtest run:", { backtestId }, e);
+      try {
+        await storage.appendBacktestLog(backtestId, `\n✗ Failed to read user_data/config.json: ${e instanceof Error ? e.message : String(e)}\n`);
+      } catch (err) {
+        console.error("Failed to append backtest log after config read error:", err);
+      }
+      await storage.updateBacktestStatus(backtestId, "failed");
+      return;
     }
 
     const effectiveConfig = applyBacktestOverridesToConfig(baseConfig, config);
@@ -4283,8 +4613,9 @@ async function runActualBacktest(backtestId: number, config: any) {
         const tail = pairs.length > head.length ? ` ... (+${pairs.length - head.length} more)` : "";
         await storage.appendBacktestLog(backtestId, `\nPairs selected: ${pairs.length}\n${head.join(", ")}${tail}\n`);
       }
-    } catch {
+    } catch (e) {
       // best-effort
+      logOnce(`backtest:${backtestId}:pairs-log`, "Failed to append pairs selected log", e);
     }
 
     // Build the freqtrade backtest command
